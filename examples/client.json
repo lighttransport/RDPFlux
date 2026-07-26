@@ -1,0 +1,21 @@
+{
+  "local_forwards": [
+    {
+      "name": "ssh-to-rdp-host",
+      "listen": "127.0.0.1:2222",
+      "target": "127.0.0.1:22"
+    }
+  ],
+  "socks": [
+    {
+      "listen": "127.0.0.1:1080"
+    }
+  ],
+  "reverse_forwards": [],
+  "limits": {
+    "max_streams": 128,
+    "connect_timeout": 15,
+    "idle_timeout": 0
+  }
+}
+

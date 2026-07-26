@@ -1,0 +1,11 @@
+{
+  "allow_targets": [
+    "127.0.0.0/8:*",
+    "::1/128:*"
+  ],
+  "enable_reverse": false,
+  "allow_nonloopback_reverse": false,
+  "max_streams": 128,
+  "connect_timeout": 15
+}
+
