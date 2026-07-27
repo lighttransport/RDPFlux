@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import AgentConfig, ClientConfig, Endpoint, ForwardRule
-from .mux import MuxPeer, MuxStream
+from .mux import MuxPeer, MuxStream, describe_exception
 from .policy import resolve_allowed, validate_reverse_listener
 
 LOG = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ class ClientForwarder:
             stream = await self.peer.open_stream({"kind": "tcp", "host": rule.target.host, "port": rule.target.port}, self.config.connect_timeout)
             await bridge_socket(reader, writer, stream, self.config.idle_timeout)
         except Exception as exc:
-            LOG.warning("forward to %s failed: %s", rule.target, exc)
+            LOG.warning("forward to %s failed: %s", rule.target, describe_exception(exc))
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
@@ -158,7 +158,7 @@ class ClientForwarder:
         except (asyncio.IncompleteReadError, UnicodeError):
             pass
         except Exception as exc:
-            LOG.warning("SOCKS connection failed: %s", exc)
+            LOG.warning("SOCKS connection failed: %s", describe_exception(exc))
             if stream is None:
                 with contextlib.suppress(Exception):
                     await self._socks_reply(writer, 5)
@@ -261,7 +261,7 @@ class AgentForwarder:
             stream = await self.peer.open_stream({"kind": "reverse", "rule_id": rule_id}, self.config.connect_timeout)
             await bridge_socket(reader, writer, stream)
         except Exception as exc:
-            LOG.warning("reverse stream %s failed: %s", rule_id, exc)
+            LOG.warning("reverse stream %s failed: %s", rule_id, describe_exception(exc))
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

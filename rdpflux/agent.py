@@ -8,7 +8,7 @@ import sys
 
 from .config import load_agent_config, parse_allowed_target
 from .forwarding import AgentForwarder
-from .mux import MuxPeer
+from .mux import MuxPeer, describe_exception
 from .paths import default_agent_config, optional_config
 from .windows_wts import open_agent_transport
 
@@ -24,12 +24,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true", help="exit instead of waiting for an RDP reconnect")
     parser.add_argument("--verbose", action="store_true")
     return parser
-
-
-def _describe(exc: BaseException) -> str:
-    """Bare TimeoutError and friends stringify to '', which logs as a blank reason."""
-    text = str(exc)
-    return text if text else type(exc).__name__
 
 
 async def _run(args) -> None:
@@ -51,7 +45,7 @@ async def _run(args) -> None:
             finally:
                 await forwarder.close()
         except Exception as exc:
-            logging.warning("RDP channel unavailable: %s", _describe(exc))
+            logging.warning("RDP channel unavailable: %s", describe_exception(exc))
         if args.once:
             logging.info("exiting after one session (--once)")
             return

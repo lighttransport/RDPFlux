@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from rdpflux.agent import _describe
+from rdpflux.mux import describe_exception
 from rdpflux.config import ClientConfig
 from rdpflux.mstsc_plugin import _ChannelRuntime
 
@@ -131,5 +131,5 @@ def test_configure_logging_writes_to_the_file(tmp_path):
 
 
 def test_describe_names_empty_exceptions():
-    assert _describe(TimeoutError()) == "TimeoutError"
-    assert _describe(ConnectionError("refused")) == "refused"
+    assert describe_exception(TimeoutError()) == "TimeoutError"
+    assert describe_exception(ConnectionError("refused")) == "refused"

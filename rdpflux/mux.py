@@ -24,6 +24,12 @@ class StreamClosed(ConnectionError):
     pass
 
 
+def describe_exception(exc: BaseException) -> str:
+    """Bare TimeoutError and friends stringify to '', which logs as a blank reason."""
+    text = str(exc)
+    return text if text else type(exc).__name__
+
+
 class MuxStream:
     def __init__(self, peer: "MuxPeer", stream_id: int) -> None:
         self.peer = peer
