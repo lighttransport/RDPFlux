@@ -18,6 +18,27 @@ LOG = logging.getLogger(__name__)
 CHANNEL_NAME = b"com.rdpflux.v1"
 
 
+class _ConfigReloader:
+    """Re-read the client config per channel so an RDP reconnect picks up edits.
+
+    The COM server outlives individual RDP sessions, so a config loaded once at
+    process start could only be refreshed by killing the plugin.
+    """
+
+    def __init__(self, config: ClientConfig, factory=None) -> None:
+        self._config = config
+        self._factory = factory
+
+    def current(self) -> ClientConfig:
+        if self._factory is None:
+            return self._config
+        try:
+            self._config = self._factory()
+        except Exception:
+            LOG.exception("reloading the client config failed; keeping the previous one")
+        return self._config
+
+
 MAX_RESTARTS = 5
 RESTART_BACKOFF = 1.0
 MAX_RESTART_BACKOFF = 10.0
@@ -140,7 +161,7 @@ class _ChannelRuntime:
             await forwarder.close()
 
 
-def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
+def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_factory=None) -> int:
     try:
         from win32more._comclass import ComClass
         from win32more._win32api import E_FAIL, Guid, HRESULT, S_OK
@@ -179,6 +200,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
         raise RuntimeError("mstsc support requires: pip install 'rdpflux[mstsc]'") from exc
 
     shutdown = threading.Event()
+    reloader = _ConfigReloader(config, config_factory)
 
     def hr_value(value) -> int:
         return int(getattr(value, "value", value if value is not None else E_FAIL))
@@ -238,7 +260,11 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
                 self.channel = channel
                 add_ref(channel)
                 self.channel_ref = True
-                self.runtime = _ChannelRuntime(channel, config)
+                channel_config = reloader.current()
+                LOG.info("channel config: %d local, %d socks, %d reverse",
+                         len(channel_config.local_forwards), len(channel_config.socks),
+                         len(channel_config.reverse_forwards))
+                self.runtime = _ChannelRuntime(channel, channel_config)
                 self.runtime.start()
                 accept[0] = True
                 callback[0] = self

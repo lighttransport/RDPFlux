@@ -87,6 +87,39 @@ def test_channel_runtime_startup_failure_is_raised():
     assert runtime.restarts == 0, "pre-handshake failures must not trigger restarts"
 
 
+def test_config_reloader_picks_up_edits_per_channel():
+    from rdpflux.mstsc_plugin import _ConfigReloader
+
+    first = ClientConfig(max_streams=1)
+    second = ClientConfig(max_streams=2)
+    versions = [first, second]
+    reloader = _ConfigReloader(first, lambda: versions.pop(0))
+    assert reloader.current() is first
+    assert reloader.current() is second, "a reconnect must see config edits"
+
+
+def test_config_reloader_keeps_the_last_good_config():
+    from rdpflux.mstsc_plugin import _ConfigReloader
+
+    good = ClientConfig(max_streams=7)
+
+    def broken():
+        raise ValueError("bad json")
+
+    reloader = _ConfigReloader(good, broken)
+    # A malformed edit must not take the channel down with it.
+    assert reloader.current() is good
+    assert reloader.current() is good
+
+
+def test_config_reloader_without_a_factory_is_static():
+    from rdpflux.mstsc_plugin import _ConfigReloader
+
+    config = ClientConfig()
+    reloader = _ConfigReloader(config)
+    assert reloader.current() is config
+
+
 def test_log_path_defaults_to_plugin_log_only_under_com():
     from rdpflux.client import _log_path, _parser
     from rdpflux.paths import default_client_log

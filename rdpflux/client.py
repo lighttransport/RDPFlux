@@ -130,7 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         if os.name != "nt":
             raise RuntimeError("mstsc transport requires Windows")
         from .mstsc_plugin import run_com_server
-        return run_com_server(config, smoke_test=args.com_smoke_test)
+        return run_com_server(config, smoke_test=args.com_smoke_test,
+                              config_factory=lambda: _config(args))
     except KeyboardInterrupt:
         LOG.info("interrupted; exiting")
         return 130
