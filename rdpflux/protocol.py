@@ -55,7 +55,10 @@ class FrameDecoder:
         while len(self._buffer) >= HEADER.size:
             magic, version, raw_kind, flags, stream_id, length = HEADER.unpack_from(self._buffer)
             if magic != MAGIC:
-                raise ProtocolError("invalid frame magic")
+                preview = bytes(self._buffer[:HEADER.size])
+                raise ProtocolError(
+                    f"invalid frame magic {magic!r}; first {len(preview)} bytes {preview.hex(' ')}"
+                )
             if version != VERSION:
                 raise ProtocolError(f"unsupported protocol version {version}")
             if length > MAX_PAYLOAD:

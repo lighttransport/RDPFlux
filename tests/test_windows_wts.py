@@ -66,6 +66,34 @@ def test_compressed_and_truncated_chunks_are_rejected():
         reassembler.feed(b"\x00\x01\x02")
 
 
+def test_captured_dvc_hello_ack_chunk():
+    """A real HELLO_ACK read off a WTS_CHANNEL_OPTION_DYNAMIC channel.
+
+    Dynamic channels carry CHANNEL_PDU_HEADER too, so the header must be stripped
+    before the frame decoder ever sees the payload.
+    """
+    from rdpflux.protocol import FrameDecoder, MessageType
+
+    captured = bytes.fromhex(
+        "27000000"          # length = 39 (the reassembled message)
+        "03000000"          # CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST
+        "52325450"          # R2TP
+        "01"                # version 1
+        "02"                # HELLO_ACK
+        "0000"              # flags
+        "00000000"          # stream id
+        "00000017"          # payload length = 23
+    ) + b'{"ok":true,"version":1}'
+
+    message = ChunkReassembler().feed(captured)
+    assert message is not None
+    assert len(message) == 39
+    assert message.startswith(b"R2TP")
+
+    frames = FrameDecoder().feed(message)
+    assert [frame.kind for frame in frames] == [MessageType.HELLO_ACK]
+
+
 def test_oversized_message_is_rejected():
     reassembler = ChunkReassembler(max_message=16)
     with pytest.raises(WTSError, match="exceeds"):

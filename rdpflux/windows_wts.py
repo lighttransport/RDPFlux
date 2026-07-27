@@ -76,8 +76,11 @@ class WTSChannelTransport(AsyncTransport):
         self.dynamic = dynamic
         self._closed = False
         self._write_lock = asyncio.Lock()
-        # Dynamic channels are reassembled by the DVC layer; static ones are not.
-        self._reassembler = None if dynamic else ChunkReassembler()
+        # WTSVirtualChannelRead prefixes every chunk with CHANNEL_PDU_HEADER even
+        # when the channel was opened with WTS_CHANNEL_OPTION_DYNAMIC, so reads are
+        # reassembled on both channel types. Writes stay unheadered either way: the
+        # RDP stack adds the header itself.
+        self._reassembler = ChunkReassembler()
         self._wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
         self._configure_api()
 
@@ -112,8 +115,6 @@ class WTSChannelTransport(AsyncTransport):
                 if received.value:
                     data = buffer.raw[:received.value]
                     LOG.debug("channel read %d bytes: %s", len(data), data[:32].hex(" "))
-                    if self._reassembler is None:
-                        return data
                     message = self._reassembler.feed(data)
                     if message is None:
                         continue  # mid-message; wait for the remaining chunks
@@ -139,9 +140,6 @@ class WTSChannelTransport(AsyncTransport):
 
     def _blocking_write(self, data: bytes) -> None:
         if not data:
-            return
-        if self._reassembler is None:
-            self._write_all(data)
             return
         # The RDP stack adds CHANNEL_PDU_HEADER itself; we only respect the chunk
         # limit. Our own frame decoder reassembles across the resulting messages.
