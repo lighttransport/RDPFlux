@@ -26,6 +26,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _describe(exc: BaseException) -> str:
+    """Bare TimeoutError and friends stringify to '', which logs as a blank reason."""
+    text = str(exc)
+    return text if text else type(exc).__name__
+
+
 async def _run(args) -> None:
     config = load_agent_config(optional_config(args.config, default_agent_config()))
     config.allow_targets.extend(parse_allowed_target(value) for value in args.allow_target)
@@ -43,7 +49,7 @@ async def _run(args) -> None:
             finally:
                 await forwarder.close()
         except Exception as exc:
-            logging.warning("RDP channel unavailable: %s", exc)
+            logging.warning("RDP channel unavailable: %s", _describe(exc))
         if args.once:
             return
         await asyncio.sleep(max(0.1, args.retry))

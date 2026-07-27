@@ -1,7 +1,10 @@
+import ctypes
 import os
+import threading
 
 import pytest
 
+from rdpflux.agent import _describe
 from rdpflux.config import ClientConfig
 from rdpflux.mstsc_plugin import _ChannelRuntime
 
@@ -25,3 +28,65 @@ def test_channel_runtime_close_joins_worker():
     runtime.close()
     assert runtime.closed.is_set()
     assert not runtime.thread.is_alive()
+    assert runtime.restarts == 0
+
+
+def test_channel_write_uses_ubyte_buffer():
+    """IWTSVirtualChannel.Write declares pBuffer as POINTER(Byte); c_char buffers are rejected."""
+    captured = []
+
+    class Channel:
+        @staticmethod
+        def Write(size, buffer, _reserved):
+            captured.append((size, buffer))
+            return 0
+
+    runtime = _ChannelRuntime(Channel(), ClientConfig())
+    runtime._write(b"hello")
+    size, buffer = captured[0]
+    assert size == 5
+    assert ctypes.POINTER(ctypes.c_ubyte).from_param(buffer) is not None
+    assert bytes(buffer) == b"hello"
+
+    runtime._write(b"")
+    assert len(captured) == 1, "empty writes must not reach the channel"
+
+
+def test_channel_runtime_restarts_then_gives_up():
+    attempts = []
+    lock = threading.Lock()
+
+    class Channel:
+        @staticmethod
+        def Write(_size, _buffer, _reserved):
+            with lock:
+                attempts.append(1)
+            raise OSError("channel write failed")
+
+    runtime = _ChannelRuntime(Channel(), ClientConfig(), max_restarts=2, restart_backoff=0.01)
+    runtime.start()
+    runtime.thread.join(15)
+    assert not runtime.thread.is_alive()
+    assert runtime.closed.is_set()
+    assert runtime.restarts == 2, "should retry up to max_restarts before giving up"
+    # The first HELLO plus one per restart.
+    assert len(attempts) == 3
+
+
+def test_channel_runtime_startup_failure_is_raised():
+    class Channel:
+        @staticmethod
+        def Write(_size, _buffer, _reserved):
+            return 0
+
+    runtime = _ChannelRuntime(Channel(), ClientConfig(), max_restarts=1, restart_backoff=0.01)
+    runtime.config = None  # forces MuxPeer construction to fail before started is set
+    with pytest.raises(Exception):
+        runtime.start()
+    runtime.close()
+    assert runtime.restarts == 0, "pre-handshake failures must not trigger restarts"
+
+
+def test_describe_names_empty_exceptions():
+    assert _describe(TimeoutError()) == "TimeoutError"
+    assert _describe(ConnectionError("refused")) == "refused"

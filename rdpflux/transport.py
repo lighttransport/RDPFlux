@@ -133,13 +133,21 @@ class CallbackTransport(AsyncTransport):
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
+    def _submit_from_thread(self, value: bytes | None) -> None:
+        loop = self._loop
+        if loop is None or self._closed or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._incoming.put_nowait, value)
+        except RuntimeError:
+            # The loop was closed between the check above and the call.
+            pass
+
     def feed_from_thread(self, data: bytes) -> None:
-        if self._loop and not self._closed:
-            self._loop.call_soon_threadsafe(self._incoming.put_nowait, bytes(data))
+        self._submit_from_thread(bytes(data))
 
     def eof_from_thread(self) -> None:
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._incoming.put_nowait, None)
+        self._submit_from_thread(None)
 
     async def read(self) -> bytes:
         value = await self._incoming.get()

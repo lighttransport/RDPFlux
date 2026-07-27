@@ -19,54 +19,113 @@ LOG = logging.getLogger(__name__)
 CHANNEL_NAME = b"com.rdpflux.v1"
 
 
+MAX_RESTARTS = 5
+RESTART_BACKOFF = 1.0
+MAX_RESTART_BACKOFF = 10.0
+
+
 class _ChannelRuntime:
-    def __init__(self, channel, config: ClientConfig) -> None:
+    def __init__(self, channel, config: ClientConfig, *, max_restarts: int = MAX_RESTARTS,
+                 restart_backoff: float = RESTART_BACKOFF) -> None:
         self.channel = channel
         self.config = config
         self.transport = CallbackTransport(self._write)
         self.thread = threading.Thread(target=self._thread_main, name="rdpflux-dvc", daemon=True)
         self.started = threading.Event()
         self.closed = threading.Event()
+        self.stopping = threading.Event()
+        self.max_restarts = max_restarts
+        self.restart_backoff = restart_backoff
+        self.restarts = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.task: asyncio.Task[None] | None = None
         self.error: Exception | None = None
+        self.startup_error: Exception | None = None
 
     def start(self) -> None:
         self.thread.start()
         self.started.wait(5)
-        if self.error:
-            raise self.error
+        # Only failures from before the runtime signalled readiness abort the channel;
+        # anything later is handled by the restart loop in _thread_main.
+        if self.startup_error:
+            raise self.startup_error
 
     def _write(self, data: bytes) -> None:
-        buffer = ctypes.create_string_buffer(data)
+        if not data:
+            return
+        # IWTSVirtualChannel.Write declares pBuffer as POINTER(Byte); a c_char
+        # buffer is not accepted by ctypes for an LP_c_ubyte parameter.
+        buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
         hr = self.channel.Write(len(data), buffer, None)
-        if int(getattr(hr, "value", hr)) != 0:
-            raise OSError(f"IWTSVirtualChannel.Write failed: 0x{int(hr) & 0xFFFFFFFF:08x}")
+        code = int(getattr(hr, "value", hr))
+        if code != 0:
+            raise OSError(f"IWTSVirtualChannel.Write failed: 0x{code & 0xFFFFFFFF:08x}")
 
     def feed(self, data: bytes) -> None:
+        if self.closed.is_set():
+            return
         self.transport.feed_from_thread(data)
 
     def close(self, timeout: float = 5.0) -> None:
+        self.stopping.set()
         self.transport.eof_from_thread()
-        if self.loop and self.task:
-            self.loop.call_soon_threadsafe(self.task.cancel)
+        self._cancel_task()
         if self.thread is not threading.current_thread() and self.thread.is_alive():
             self.thread.join(timeout)
             if self.thread.is_alive():
                 LOG.warning("mstsc channel runtime did not stop within %.1f seconds", timeout)
 
+    def _cancel_task(self) -> None:
+        loop, task = self.loop, self.task
+        if loop is None or task is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            # The loop finished between the check above and the call.
+            pass
+
     def _thread_main(self) -> None:
         try:
-            asyncio.run(self._run())
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            self.error = exc
-            LOG.exception("mstsc channel runtime failed")
-            self.started.set()
+            while not self.stopping.is_set():
+                try:
+                    asyncio.run(self._run())
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    self.error = exc
+                    LOG.exception("mstsc channel runtime failed")
+                    if not self.started.is_set():
+                        # Failed before the channel was accepted; let start() report it.
+                        self.startup_error = exc
+                        self.started.set()
+                        return
+                else:
+                    # The peer closed the tunnel cleanly; nothing to restart.
+                    return
+                if not self._wait_before_restart():
+                    return
         finally:
             self.started.set()
             self.closed.set()
+
+    def _wait_before_restart(self) -> bool:
+        if self.stopping.is_set():
+            return False
+        if self.restarts >= self.max_restarts:
+            LOG.error("mstsc channel runtime gave up after %d restarts", self.restarts)
+            return False
+        delay = min(self.restart_backoff * (2 ** self.restarts), MAX_RESTART_BACKOFF)
+        self.restarts += 1
+        LOG.warning("restarting mstsc channel runtime in %.1fs (attempt %d/%d)",
+                    delay, self.restarts, self.max_restarts)
+        if self.stopping.wait(delay):
+            return False
+        # The previous transport is bound to a now-closed event loop.
+        self.transport = CallbackTransport(self._write)
+        self.loop = None
+        self.task = None
+        return True
 
     async def _run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -191,6 +250,11 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
                 return hr_value(E_FAIL)
 
         def OnDataReceived(self, size: int, data_ptr) -> int:
+            if self.runtime and self.runtime.closed.is_set():
+                # The runtime thread exited (see logged traceback); tear the channel down
+                # instead of silently dropping data.
+                self._close_channel()
+                return hr_value(E_FAIL)
             if size > 0 and data_ptr and self.runtime:
                 try:
                     self.runtime.feed(ctypes.string_at(data_ptr, size))
