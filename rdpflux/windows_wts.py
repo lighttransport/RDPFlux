@@ -5,6 +5,7 @@ import ctypes
 import logging
 import os
 import struct
+import threading
 from ctypes import wintypes
 
 from .transport import AsyncTransport
@@ -33,7 +34,9 @@ CHANNEL_FLAG_LAST = 0x00000002
 CHANNEL_PACKET_COMPRESSED = 0x00200000
 MAX_SVC_MESSAGE = 1024 * 1024
 READ_BUFFER_SIZE = 64 * 1024
-READ_TIMEOUT_MS = 1000
+# Reads hold the channel lock for their whole timeout, so keep it short enough
+# that a concurrent write is not stalled noticeably.
+READ_TIMEOUT_MS = 200
 
 
 class WTSError(OSError):
@@ -96,6 +99,12 @@ class WTSChannelTransport(AsyncTransport):
         # call returns. Keep one buffer alive for the life of the transport rather
         # than freeing a fresh one after every poll.
         self._read_buffer = ctypes.create_string_buffer(READ_BUFFER_SIZE)
+        # Same reasoning for writes: reuse one buffer instead of handing the stack
+        # a fresh allocation per chunk and freeing it the moment the call returns.
+        self._write_buffer = ctypes.create_string_buffer(CHANNEL_CHUNK_LENGTH)
+        # WTSVirtualChannelRead and Write run on separate to_thread workers and the
+        # WTS API gives no thread-safety guarantee for one handle, so serialise them.
+        self._io_lock = threading.Lock()
         self._wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
         self._configure_api()
 
@@ -125,7 +134,11 @@ class WTSChannelTransport(AsyncTransport):
         while not self._closed:
             buffer = self._read_buffer
             received = wintypes.ULONG()
-            ok = self._wts.WTSVirtualChannelRead(self.handle, READ_TIMEOUT_MS, buffer, len(buffer), ctypes.byref(received))
+            with self._io_lock:
+                ok = self._wts.WTSVirtualChannelRead(
+                    self.handle, READ_TIMEOUT_MS, buffer, len(buffer), ctypes.byref(received),
+                )
+                error = 0 if ok else ctypes.get_last_error()
             if ok:
                 if received.value:
                     data = buffer.raw[:received.value]
@@ -135,7 +148,6 @@ class WTSChannelTransport(AsyncTransport):
                         continue  # mid-message; wait for the remaining chunks
                     return message
                 continue
-            error = ctypes.get_last_error()
             if error in BENIGN_READ_ERRORS:
                 continue
             raise WTSError(error, f"read from RDP channel {self.channel_name} failed")
@@ -145,10 +157,15 @@ class WTSChannelTransport(AsyncTransport):
         return await asyncio.to_thread(self._blocking_read)
 
     def _write_all(self, data: bytes) -> None:
-        buffer = ctypes.create_string_buffer(data, len(data))
+        if len(data) > CHANNEL_CHUNK_LENGTH:
+            raise WTSError(f"chunk of {len(data)} exceeds CHANNEL_CHUNK_LENGTH")
+        buffer = self._write_buffer
+        buffer[:len(data)] = data
         written = wintypes.ULONG()
-        if not self._wts.WTSVirtualChannelWrite(self.handle, buffer, len(data), ctypes.byref(written)):
-            error = ctypes.get_last_error()
+        with self._io_lock:
+            ok = self._wts.WTSVirtualChannelWrite(self.handle, buffer, len(data), ctypes.byref(written))
+            error = 0 if ok else ctypes.get_last_error()
+        if not ok:
             raise WTSError(error, f"write to RDP channel {self.channel_name} failed")
         if written.value != len(data):
             raise WTSError(f"short RDP channel write: {written.value}/{len(data)}")

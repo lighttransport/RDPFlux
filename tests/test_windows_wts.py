@@ -1,3 +1,4 @@
+import ctypes
 import os
 
 import pytest
@@ -110,6 +111,51 @@ def test_idle_read_timeout_is_not_fatal():
     # Genuine channel failures must still propagate.
     assert 6 not in BENIGN_READ_ERRORS  # ERROR_INVALID_HANDLE
     assert 109 not in BENIGN_READ_ERRORS  # ERROR_BROKEN_PIPE
+
+
+def _fake_transport():
+    """A WTSChannelTransport with the ctypes plumbing replaced by a recorder."""
+    import ctypes
+    import threading
+
+    from rdpflux.windows_wts import WTSChannelTransport
+
+    transport = object.__new__(WTSChannelTransport)
+    transport.handle = 1
+    transport.channel_name = "test"
+    transport._write_buffer = ctypes.create_string_buffer(CHANNEL_CHUNK_LENGTH)
+    transport._io_lock = threading.Lock()
+    writes = []
+
+    class FakeWts:
+        @staticmethod
+        def WTSVirtualChannelWrite(_handle, buffer, size, written):
+            writes.append(bytes(buffer[:size]))
+            written._obj.value = size
+            return 1
+
+    transport._wts = FakeWts()
+    return transport, writes
+
+
+def test_write_splits_at_the_chunk_limit():
+    transport, writes = _fake_transport()
+    payload = bytes(range(256)) * 20  # 5120 bytes
+    transport._blocking_write(payload)
+    assert len(writes) == 4, "5120 bytes must split into four chunks"
+    assert all(len(chunk) <= CHANNEL_CHUNK_LENGTH for chunk in writes)
+    assert b"".join(writes) == payload, "chunking must preserve the byte stream"
+
+
+def test_write_reuses_one_buffer_and_ignores_empty():
+    transport, writes = _fake_transport()
+    before = ctypes.addressof(transport._write_buffer)
+    transport._blocking_write(b"first")
+    transport._blocking_write(b"second-and-longer")
+    assert ctypes.addressof(transport._write_buffer) == before, "buffer must not be reallocated"
+    assert writes == [b"first", b"second-and-longer"], "stale bytes must not leak between writes"
+    transport._blocking_write(b"")
+    assert len(writes) == 2, "empty writes must not reach the channel"
 
 
 def test_oversized_message_is_rejected():
