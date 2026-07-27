@@ -5,6 +5,7 @@ import pytest
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="WTS virtual channels are Windows-only")
 
 from rdpflux.windows_wts import (  # noqa: E402
+    BENIGN_READ_ERRORS,
     CHANNEL_CHUNK_LENGTH,
     CHANNEL_FLAG_FIRST,
     CHANNEL_FLAG_LAST,
@@ -92,6 +93,23 @@ def test_captured_dvc_hello_ack_chunk():
 
     frames = FrameDecoder().feed(message)
     assert [frame.kind for frame in frames] == [MessageType.HELLO_ACK]
+
+
+def test_idle_read_timeout_is_not_fatal():
+    """An idle poll must not tear the channel down.
+
+    A dynamic channel reports an expired read timeout as ERROR_IO_INCOMPLETE (996)
+    rather than ERROR_SEM_TIMEOUT, which previously killed the tunnel one second
+    after the handshake.
+    """
+    assert 996 in BENIGN_READ_ERRORS  # ERROR_IO_INCOMPLETE
+    assert 997 in BENIGN_READ_ERRORS  # ERROR_IO_PENDING
+    assert 121 in BENIGN_READ_ERRORS  # ERROR_SEM_TIMEOUT
+    assert 1460 in BENIGN_READ_ERRORS  # ERROR_TIMEOUT
+    assert 0 in BENIGN_READ_ERRORS
+    # Genuine channel failures must still propagate.
+    assert 6 not in BENIGN_READ_ERRORS  # ERROR_INVALID_HANDLE
+    assert 109 not in BENIGN_READ_ERRORS  # ERROR_BROKEN_PIPE
 
 
 def test_oversized_message_is_rejected():

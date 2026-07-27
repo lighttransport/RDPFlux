@@ -13,7 +13,15 @@ LOG = logging.getLogger(__name__)
 WTS_CURRENT_SESSION = 0xFFFFFFFF
 WTS_CHANNEL_OPTION_DYNAMIC = 0x00000001
 ERROR_SEM_TIMEOUT = 121
+ERROR_IO_INCOMPLETE = 996
+ERROR_IO_PENDING = 997
 ERROR_TIMEOUT = 1460
+
+# A read that simply ran out its timeout with no data is normal for a polling
+# loop and must not tear the channel down. WTSVirtualChannelRead reports that as
+# ERROR_IO_INCOMPLETE on a dynamic channel rather than one of the timeout codes;
+# ERROR_IO_PENDING is the same "no data yet" condition from overlapped I/O.
+BENIGN_READ_ERRORS = frozenset({0, ERROR_SEM_TIMEOUT, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_TIMEOUT})
 
 # MS-RDPBCGR 2.2.6.1: static virtual channel data is chunked, and every chunk
 # carries a CHANNEL_PDU_HEADER whose length field is the size of the whole
@@ -121,7 +129,7 @@ class WTSChannelTransport(AsyncTransport):
                     return message
                 continue
             error = ctypes.get_last_error()
-            if error in (0, ERROR_SEM_TIMEOUT, ERROR_TIMEOUT):
+            if error in BENIGN_READ_ERRORS:
                 continue
             raise WTSError(error, f"read from RDP channel {self.channel_name} failed")
         return b""
