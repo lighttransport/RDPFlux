@@ -32,6 +32,8 @@ CHANNEL_FLAG_FIRST = 0x00000001
 CHANNEL_FLAG_LAST = 0x00000002
 CHANNEL_PACKET_COMPRESSED = 0x00200000
 MAX_SVC_MESSAGE = 1024 * 1024
+READ_BUFFER_SIZE = 64 * 1024
+READ_TIMEOUT_MS = 1000
 
 
 class WTSError(OSError):
@@ -89,6 +91,11 @@ class WTSChannelTransport(AsyncTransport):
         # reassembled on both channel types. Writes stay unheadered either way: the
         # RDP stack adds the header itself.
         self._reassembler = ChunkReassembler()
+        # A timed-out read reports ERROR_IO_INCOMPLETE, the overlapped "not
+        # signaled" status, so the RDP stack may still hold this buffer when the
+        # call returns. Keep one buffer alive for the life of the transport rather
+        # than freeing a fresh one after every poll.
+        self._read_buffer = ctypes.create_string_buffer(READ_BUFFER_SIZE)
         self._wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
         self._configure_api()
 
@@ -116,9 +123,9 @@ class WTSChannelTransport(AsyncTransport):
 
     def _blocking_read(self) -> bytes:
         while not self._closed:
-            buffer = ctypes.create_string_buffer(64 * 1024)
+            buffer = self._read_buffer
             received = wintypes.ULONG()
-            ok = self._wts.WTSVirtualChannelRead(self.handle, 1000, buffer, len(buffer), ctypes.byref(received))
+            ok = self._wts.WTSVirtualChannelRead(self.handle, READ_TIMEOUT_MS, buffer, len(buffer), ctypes.byref(received))
             if ok:
                 if received.value:
                     data = buffer.raw[:received.value]

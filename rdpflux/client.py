@@ -118,14 +118,25 @@ def main(argv: list[str] | None = None) -> int:
         _parser().print_help()
         return 2
     _configure_logging(args, embedding)
-    config = _config(args)
-    if args.transport == "freerdp":
-        asyncio.run(_run_freerdp(config))
-        return 0
-    if os.name != "nt":
-        raise RuntimeError("mstsc transport requires Windows")
-    from .mstsc_plugin import run_com_server
-    return run_com_server(config, smoke_test=args.com_smoke_test)
+    # A COM-launched server has nowhere to print a traceback, so anything that
+    # escapes here would look like a silent startup failure in the log.
+    try:
+        config = _config(args)
+        LOG.info("config: %d local, %d socks, %d reverse", len(config.local_forwards),
+                 len(config.socks), len(config.reverse_forwards))
+        if args.transport == "freerdp":
+            asyncio.run(_run_freerdp(config))
+            return 0
+        if os.name != "nt":
+            raise RuntimeError("mstsc transport requires Windows")
+        from .mstsc_plugin import run_com_server
+        return run_com_server(config, smoke_test=args.com_smoke_test)
+    except KeyboardInterrupt:
+        LOG.info("interrupted; exiting")
+        return 130
+    except Exception:
+        LOG.exception("client failed to start")
+        return 1
 
 
 if __name__ == "__main__":
