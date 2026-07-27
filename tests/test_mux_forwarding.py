@@ -170,3 +170,59 @@ async def test_reverse_forward():
     await agent.close()
     echo.close()
     await echo.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_close_does_not_kill_the_mux():
+    """Both peers close independently, so CLOSE crosses the wire in each direction.
+
+    Whichever arrives second finds the stream already removed. That used to raise
+    ProtocolError("unknown stream N") and tear down the entire mux, killing every
+    other connection over the tunnel.
+    """
+    left, right = MemoryTransport.pair()
+    client_peer = MuxPeer(left, role="client")
+    agent_peer = MuxPeer(right, role="agent")
+    opened: list[MuxStream] = []
+
+    async def accept(stream, _metadata):
+        opened.append(stream)
+
+    agent_peer.set_handlers(on_open=accept)
+    client_peer.set_handlers(on_open=accept)
+    await asyncio.gather(agent_peer.start(), client_peer.start())
+    await asyncio.gather(client_peer.wait_ready(), agent_peer.wait_ready())
+
+    stream = await client_peer.open_stream({"kind": "tcp", "host": "127.0.0.1", "port": 1})
+    await asyncio.sleep(0.05)
+    peer_stream = opened[0]
+
+    # Close from both ends before either has processed the other's CLOSE.
+    await asyncio.gather(stream.close("client done"), peer_stream.close("agent done"))
+    await asyncio.sleep(0.1)
+
+    assert not client_peer._closed.is_set(), "client mux must survive a crossing CLOSE"
+    assert not agent_peer._closed.is_set(), "agent mux must survive a crossing CLOSE"
+
+    # The tunnel must still carry new streams afterwards.
+    second = await client_peer.open_stream({"kind": "tcp", "host": "127.0.0.1", "port": 2})
+    assert second.stream_id != stream.stream_id
+
+    await client_peer.close()
+    await agent_peer.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_frames_for_closed_streams_are_dropped():
+    from rdpflux.protocol import Frame, MessageType, encode_control
+
+    left, right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client")
+    peer._ready.set()
+    for frame in (
+        Frame(MessageType.DATA, 99, b"late"),
+        Frame(MessageType.WINDOW_UPDATE, 99, encode_control({"credit": 10})),
+        Frame(MessageType.HALF_CLOSE, 99),
+        Frame(MessageType.CLOSE, 99, encode_control({"reason": "gone"})),
+    ):
+        await peer._dispatch(frame)  # must not raise

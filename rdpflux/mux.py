@@ -279,23 +279,22 @@ class MuxPeer:
                 raise ProtocolError("unexpected OPEN_RESULT")
             future.set_result(decode_control(frame.payload))
         elif frame.kind == MessageType.DATA:
-            if frame.stream_id in self._abandoned_opens:
-                return
-            await self._stream(frame.stream_id)._receive(frame.payload)
+            stream = self._live_stream(frame)
+            if stream is not None:
+                await stream._receive(frame.payload)
         elif frame.kind == MessageType.WINDOW_UPDATE:
-            if frame.stream_id in self._abandoned_opens:
-                return
-            await self._stream(frame.stream_id)._add_credit(int(decode_control(frame.payload).get("credit", 0)))
+            stream = self._live_stream(frame)
+            if stream is not None:
+                await stream._add_credit(int(decode_control(frame.payload).get("credit", 0)))
         elif frame.kind == MessageType.HALF_CLOSE:
-            if frame.stream_id in self._abandoned_opens:
-                return
-            await self._stream(frame.stream_id)._receive_eof()
+            stream = self._live_stream(frame)
+            if stream is not None:
+                await stream._receive_eof()
         elif frame.kind == MessageType.CLOSE:
-            if frame.stream_id in self._abandoned_opens:
-                self._remove_stream(frame.stream_id)
-                return
-            stream = self._stream(frame.stream_id)
-            await stream._remote_close()
+            self._abandoned_opens.discard(frame.stream_id)
+            stream = self.streams.get(frame.stream_id)
+            if stream is not None:
+                await stream._remote_close()
             self._remove_stream(frame.stream_id)
         elif frame.kind == MessageType.LISTEN:
             await self._handle_listen(frame)
@@ -309,11 +308,20 @@ class MuxPeer:
         elif frame.kind != MessageType.PONG:
             raise ProtocolError(f"unexpected message {frame.kind.name}")
 
-    def _stream(self, stream_id: int) -> MuxStream:
-        try:
-            return self.streams[stream_id]
-        except KeyError as exc:
-            raise ProtocolError(f"unknown stream {stream_id}") from exc
+    def _live_stream(self, frame: Frame) -> MuxStream | None:
+        """Return the stream, or None when the frame is stale rather than invalid.
+
+        Both peers close a stream independently, so a CLOSE crosses the wire in
+        each direction and in-flight frames can arrive after the local side has
+        already removed the stream. Treating that as a protocol error tore down
+        the whole mux over one finished connection.
+        """
+        if frame.stream_id in self._abandoned_opens:
+            return None
+        stream = self.streams.get(frame.stream_id)
+        if stream is None:
+            LOG.debug("dropping %s for closed stream %d", frame.kind.name, frame.stream_id)
+        return stream
 
     async def _handle_open(self, frame: Frame) -> None:
         expected_parity = 0 if self.role == "client" else 1
