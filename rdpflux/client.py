@@ -3,15 +3,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import os
 import sys
+from pathlib import Path
 
 from .config import ClientConfig, ForwardRule, parse_endpoint, load_client_config
 from .forwarding import ClientForwarder
 from .mux import MuxPeer
-from .paths import default_client_config, optional_config
+from .paths import default_client_config, default_client_log, optional_config
 from .registry import register, unregister
 from .transport import FreeRDPStdioTransport
+
+LOG = logging.getLogger(__name__)
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+LOG_MAX_BYTES = 1024 * 1024
+LOG_BACKUP_COUNT = 3
 
 
 def _forward(value: str) -> ForwardRule:
@@ -37,8 +44,39 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--socks", action="append", default=[])
     run.add_argument("--reverse", action="append", type=_forward, default=[])
     run.add_argument("--verbose", action="store_true")
+    run.add_argument("--log-file", help="write logs here; defaults to the mstsc plugin log when run by COM")
+    run.add_argument("--no-log-file", action="store_true", help="disable the default mstsc plugin log file")
     run.add_argument("--com-smoke-test", action="store_true", help=argparse.SUPPRESS)
     return parser
+
+
+def _log_path(args, embedding: bool) -> Path | None:
+    if args.no_log_file:
+        return None
+    if args.log_file:
+        return Path(args.log_file)
+    # A COM-launched server has no console, so its stderr goes nowhere.
+    return default_client_log() if embedding else None
+
+
+def _configure_logging(args, embedding: bool) -> None:
+    level = logging.DEBUG if args.verbose else logging.INFO
+    handlers: list[logging.Handler] = []
+    path = _log_path(args, embedding)
+    if path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(logging.handlers.RotatingFileHandler(
+                path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
+            ))
+        except OSError as exc:  # unwritable path; keep going on stderr
+            print(f"cannot open log file {path}: {exc}", file=sys.stderr)
+            path = None
+    if not embedding or not handlers:
+        handlers.append(logging.StreamHandler(sys.stderr))
+    logging.basicConfig(level=level, format=LOG_FORMAT, handlers=handlers, force=True)
+    if path is not None:
+        LOG.info("logging to %s", path)
 
 
 def _config(args) -> ClientConfig:
@@ -79,8 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "run":
         _parser().print_help()
         return 2
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
+    _configure_logging(args, embedding)
     config = _config(args)
     if args.transport == "freerdp":
         asyncio.run(_run_freerdp(config))

@@ -5,7 +5,6 @@ import ctypes
 import logging
 import threading
 import time
-import traceback
 from ctypes import byref, c_int, c_void_p
 from ctypes.wintypes import DWORD
 
@@ -214,7 +213,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
                     self.listener = listener
                 return hr_value(result)
             except Exception:
-                traceback.print_exc()
+                LOG.exception("IWTSPlugin.Initialize failed")
                 return hr_value(E_FAIL)
 
         def Connected(self) -> int:
@@ -245,7 +244,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
                 callback[0] = self
                 return hr_value(S_OK)
             except Exception:
-                traceback.print_exc()
+                LOG.exception("opening the mstsc channel failed")
                 self._close_channel()
                 return hr_value(E_FAIL)
 
@@ -259,7 +258,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
                 try:
                     self.runtime.feed(ctypes.string_at(data_ptr, size))
                 except Exception:
-                    traceback.print_exc()
+                    LOG.exception("feeding channel data failed")
                     return hr_value(E_FAIL)
             return hr_value(S_OK)
 
@@ -283,7 +282,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
             try:
                 return TunnelPlugin().QueryInterface(iid, output)
             except Exception:
-                traceback.print_exc()
+                LOG.exception("CreateInstance failed")
                 return HRESULT(E_FAIL)
 
         def LockServer(self, _lock: c_int) -> HRESULT:

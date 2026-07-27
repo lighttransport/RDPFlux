@@ -12,6 +12,11 @@ def default_client_config() -> Path:
     return root / "rdpflux" / "client.json"
 
 
+def default_client_log() -> Path:
+    """Where the mstsc COM server logs, since its stderr is not attached to a console."""
+    return default_client_config().parent / "client.log"
+
+
 def default_agent_config() -> Path:
     root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     return root / "rdpflux" / "agent.json"

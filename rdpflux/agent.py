@@ -45,14 +45,19 @@ async def _run(args) -> None:
             forwarder = AgentForwarder(peer, config)
             try:
                 await forwarder.start()
+                logging.info("tunnel ready on %s; waiting for streams", transport.channel_name)
                 await peer.wait_closed()
+                logging.info("RDP channel closed by the peer")
             finally:
                 await forwarder.close()
         except Exception as exc:
             logging.warning("RDP channel unavailable: %s", _describe(exc))
         if args.once:
+            logging.info("exiting after one session (--once)")
             return
-        await asyncio.sleep(max(0.1, args.retry))
+        delay = max(0.1, args.retry)
+        logging.info("reconnecting in %.1fs", delay)
+        await asyncio.sleep(delay)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,7 +70,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
+        logging.info("interrupted; exiting")
         return 130
+    except Exception:
+        logging.exception("agent stopped by an unhandled error")
+        return 1
+    logging.info("agent loop finished; exiting")
     return 0
 
 

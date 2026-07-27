@@ -87,6 +87,49 @@ def test_channel_runtime_startup_failure_is_raised():
     assert runtime.restarts == 0, "pre-handshake failures must not trigger restarts"
 
 
+def test_log_path_defaults_to_plugin_log_only_under_com():
+    from rdpflux.client import _log_path, _parser
+    from rdpflux.paths import default_client_log
+
+    args = _parser().parse_args(["run"])
+    assert _log_path(args, embedding=True) == default_client_log()
+    assert _log_path(args, embedding=False) is None, "interactive runs stay on stderr"
+
+
+def test_log_path_honours_explicit_and_disabled():
+    from rdpflux.client import _log_path, _parser
+
+    explicit = _parser().parse_args(["run", "--log-file", r"C:\tmp\rdpflux.log"])
+    assert str(_log_path(explicit, embedding=False)) == r"C:\tmp\rdpflux.log"
+    assert str(_log_path(explicit, embedding=True)) == r"C:\tmp\rdpflux.log"
+
+    disabled = _parser().parse_args(["run", "--no-log-file"])
+    assert _log_path(disabled, embedding=True) is None
+    assert _log_path(disabled, embedding=False) is None
+
+
+def test_configure_logging_writes_to_the_file(tmp_path):
+    import logging
+
+    from rdpflux.client import _configure_logging, _parser
+
+    target = tmp_path / "nested" / "client.log"
+    args = _parser().parse_args(["run", "--log-file", str(target), "--verbose"])
+    root = logging.getLogger()
+    saved = list(root.handlers), root.level
+    try:
+        _configure_logging(args, embedding=True)
+        logging.getLogger("rdpflux.test").warning("hello from the plugin")
+        for handler in root.handlers:
+            handler.flush()
+        assert target.exists(), "the parent directory must be created"
+        assert "hello from the plugin" in target.read_text(encoding="utf-8")
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers, root.level = saved
+
+
 def test_describe_names_empty_exceptions():
     assert _describe(TimeoutError()) == "TimeoutError"
     assert _describe(ConnectionError("refused")) == "refused"
