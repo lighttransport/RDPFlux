@@ -25,7 +25,7 @@ def _forward(value: str) -> ForwardRule:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rdp2tcp-client")
+    parser = argparse.ArgumentParser(prog="rdpflux-client")
     sub = parser.add_subparsers(dest="command")
     for name in ("register", "unregister"):
         item = sub.add_parser(name)

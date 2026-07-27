@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from rdp2tcp.transport import FreeRDPStdioTransport
+from rdpflux.transport import FreeRDPStdioTransport
 
 
 @pytest.mark.asyncio

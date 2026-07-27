@@ -27,17 +27,17 @@ foreach ($DllName in @("ffi.dll", "libbz2.dll", "liblzma.dll", "libcrypto-3-x64.
 }
 
 $ClientArgs = @(
-    "--noconfirm", "--onefile", "--name", "rdp2tcp-client",
+    "--noconfirm", "--onefile", "--name", "rdpflux-client",
     "--workpath", "build\client", "--distpath", "dist", "--specpath", "build\spec"
 ) + $ExtraBinaries + @("scripts/client_entry.py")
 python -m PyInstaller @ClientArgs
-if ($LASTEXITCODE -ne 0) { throw "rdp2tcp-client build failed" }
+if ($LASTEXITCODE -ne 0) { throw "rdpflux-client build failed" }
 
 $AgentArgs = @(
-    "--noconfirm", "--onefile", "--name", "rdp2tcp-agent",
+    "--noconfirm", "--onefile", "--name", "rdpflux-agent",
     "--workpath", "build\agent", "--distpath", "dist", "--specpath", "build\spec"
 ) + $ExtraBinaries + @("scripts/agent_entry.py")
 python -m PyInstaller @AgentArgs
-if ($LASTEXITCODE -ne 0) { throw "rdp2tcp-agent build failed" }
+if ($LASTEXITCODE -ne 0) { throw "rdpflux-agent build failed" }
 
-Write-Host "Built dist\rdp2tcp-client.exe and dist\rdp2tcp-agent.exe"
+Write-Host "Built dist\rdpflux-client.exe and dist\rdpflux-agent.exe"

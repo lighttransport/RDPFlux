@@ -4,7 +4,7 @@ import os
 import sys
 
 PLUGIN_CLSID = "{2E719E6B-495C-4A9D-93A8-8A254F735D41}"
-ADDIN_NAME = "Rdp2TcpPython"
+ADDIN_NAME = "RDPFluxPython"
 
 
 def _require_windows():
@@ -23,7 +23,7 @@ def _server_command() -> str:
     executable = os.path.abspath(sys.executable)
     if getattr(sys, "frozen", False):
         return f'"{executable}" -Embedding'
-    return f'"{executable}" -m rdp2tcp.client -Embedding'
+    return f'"{executable}" -m rdpflux.client -Embedding'
 
 
 def register(*, machine: bool = False) -> None:
@@ -58,4 +58,3 @@ def unregister(*, machine: bool = False) -> None:
     clsid, _server, addin = _paths()
     _delete_tree(winreg, root, addin)
     _delete_tree(winreg, root, clsid)
-

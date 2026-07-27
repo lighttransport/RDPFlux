@@ -81,7 +81,8 @@ class MuxStream:
         self.peer._remove_stream(self.stream_id)
         async with self._credit_changed:
             self._credit_changed.notify_all()
-        self._incoming.put_nowait(_EOF)
+        with contextlib.suppress(asyncio.QueueFull):
+            self._incoming.put_nowait(_EOF)
 
     async def _receive(self, data: bytes) -> None:
         if self._remote_eof or self._closed:
@@ -129,6 +130,7 @@ class MuxPeer:
         self._heartbeat: asyncio.Task[None] | None = None
         self._last_received = time.monotonic()
         self._pending_opens: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._abandoned_opens: set[int] = set()
         self._pending_listens: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._open_handler: OpenHandler | None = None
         self._listen_handler: ListenHandler | None = None
@@ -162,12 +164,20 @@ class MuxPeer:
         self.streams[stream_id] = stream
         future = asyncio.get_running_loop().create_future()
         self._pending_opens[stream_id] = future
+        sent = False
         try:
             await self._send(Frame(MessageType.OPEN, stream_id, encode_control(metadata)))
+            sent = True
             result = await asyncio.wait_for(future, timeout)
             if not result.get("ok"):
                 raise ConnectionError(str(result.get("error", "open rejected")))
             return stream
+        except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+            if sent:
+                self._abandoned_opens.add(stream_id)
+            else:
+                self._remove_stream(stream_id)
+            raise
         except BaseException:
             self._remove_stream(stream_id)
             raise
@@ -251,16 +261,33 @@ class MuxPeer:
             await self._handle_open(frame)
         elif frame.kind == MessageType.OPEN_RESULT:
             future = self._pending_opens.get(frame.stream_id)
+            if frame.stream_id in self._abandoned_opens:
+                result = decode_control(frame.payload)
+                self._abandoned_opens.discard(frame.stream_id)
+                if result.get("ok"):
+                    await self._send(Frame(MessageType.CLOSE, frame.stream_id,
+                                           encode_control({"reason": "open timed out"})))
+                self._remove_stream(frame.stream_id)
+                return
             if future is None or future.done():
                 raise ProtocolError("unexpected OPEN_RESULT")
             future.set_result(decode_control(frame.payload))
         elif frame.kind == MessageType.DATA:
+            if frame.stream_id in self._abandoned_opens:
+                return
             await self._stream(frame.stream_id)._receive(frame.payload)
         elif frame.kind == MessageType.WINDOW_UPDATE:
+            if frame.stream_id in self._abandoned_opens:
+                return
             await self._stream(frame.stream_id)._add_credit(int(decode_control(frame.payload).get("credit", 0)))
         elif frame.kind == MessageType.HALF_CLOSE:
+            if frame.stream_id in self._abandoned_opens:
+                return
             await self._stream(frame.stream_id)._receive_eof()
         elif frame.kind == MessageType.CLOSE:
+            if frame.stream_id in self._abandoned_opens:
+                self._remove_stream(frame.stream_id)
+                return
             stream = self._stream(frame.stream_id)
             await stream._remote_close()
             self._remove_stream(frame.stream_id)
@@ -328,6 +355,7 @@ class MuxPeer:
         for stream in list(self.streams.values()):
             await stream._remote_close()
         self.streams.clear()
+        self._abandoned_opens.clear()
         error = ConnectionError("RDP channel disconnected")
         for future in [*self._pending_opens.values(), *self._pending_listens.values()]:
             if not future.done():

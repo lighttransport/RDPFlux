@@ -20,6 +20,11 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     loop = asyncio.get_running_loop()
     last_activity = loop.time()
 
+    async def abort(reason: str) -> None:
+        with contextlib.suppress(Exception):
+            await stream.close(reason)
+        writer.close()
+
     async def socket_to_mux() -> None:
         nonlocal last_activity
         try:
@@ -27,8 +32,8 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 last_activity = loop.time()
                 await stream.write(data)
             await stream.write_eof()
-        except (ConnectionError, OSError):
-            pass
+        except (ConnectionError, OSError) as exc:
+            await abort(str(exc))
 
     async def mux_to_socket() -> None:
         nonlocal last_activity
@@ -40,8 +45,8 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             if writer.can_write_eof():
                 writer.write_eof()
                 await writer.drain()
-        except (ConnectionError, OSError):
-            pass
+        except (ConnectionError, OSError) as exc:
+            await abort(str(exc))
 
     async def idle_monitor() -> None:
         if idle_timeout <= 0:
@@ -49,8 +54,7 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         while True:
             await asyncio.sleep(min(1.0, idle_timeout))
             if loop.time() - last_activity >= idle_timeout:
-                await stream.close("idle timeout")
-                writer.close()
+                await abort("idle timeout")
                 return
 
     tasks = [asyncio.create_task(socket_to_mux()), asyncio.create_task(mux_to_socket())]
@@ -62,7 +66,11 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             monitor.cancel()
         for task in tasks:
             task.cancel()
-        await stream.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if monitor:
+            await asyncio.gather(monitor, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await stream.close()
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()

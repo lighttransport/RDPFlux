@@ -14,7 +14,7 @@ from .windows_wts import open_agent_transport
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rdp2tcp-agent")
+    parser = argparse.ArgumentParser(prog="rdpflux-agent")
     parser.add_argument("--transport", choices=("auto", "dvc", "svc"), default="auto")
     parser.add_argument("--config")
     parser.add_argument("--allow-target", action="append", default=[])
@@ -51,7 +51,7 @@ async def _run(args) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     if os.name != "nt":
-        print("rdp2tcp-agent must run inside a Windows RDP session", file=sys.stderr)
+        print("rdpflux-agent must run inside a Windows RDP session", file=sys.stderr)
         return 2
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -65,4 +65,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

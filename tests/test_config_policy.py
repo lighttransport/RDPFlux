@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from rdp2tcp.config import AgentConfig, ConfigError, Endpoint, parse_allowed_target, parse_endpoint
-from rdp2tcp.policy import PolicyDenied, resolve_allowed
+from rdpflux.config import AgentConfig, ConfigError, Endpoint, parse_allowed_target, parse_endpoint
+from rdpflux.policy import PolicyDenied, resolve_allowed
 
 
 def test_endpoint_ipv4_ipv6_and_default():

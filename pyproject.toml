@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rdp2tcp"
+name = "rdpflux"
 version = "0.1.0"
 description = "Multiplex TCP connections over an existing RDP virtual channel"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "rdp2tcp contributors" }]
+authors = [{ name = "RDPFlux contributors" }]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: Microsoft :: Windows",
@@ -27,11 +27,11 @@ build = ["pyinstaller>=6.0"]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-rdp2tcp-client = "rdp2tcp.client:main"
-rdp2tcp-agent = "rdp2tcp.agent:main"
+rdpflux-client = "rdpflux.client:main"
+rdpflux-agent = "rdpflux.agent:main"
 
 [tool.setuptools.packages.find]
-include = ["rdp2tcp*"]
+include = ["rdpflux*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

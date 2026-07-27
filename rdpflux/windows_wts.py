@@ -92,7 +92,7 @@ def open_agent_transport(mode: str) -> WTSChannelTransport:
     errors: list[Exception] = []
     candidates = []
     if mode in ("auto", "dvc"):
-        candidates.append(("com.rdp2tcp.v1", True))
+        candidates.append(("com.rdpflux.v1", True))
     if mode in ("auto", "svc"):
         candidates.append(("rdp2tcp", False))
     for name, dynamic in candidates:
@@ -102,4 +102,3 @@ def open_agent_transport(mode: str) -> WTSChannelTransport:
             errors.append(exc)
     detail = "; ".join(str(error) for error in errors)
     raise WTSError(f"no compatible RDP virtual channel is available: {detail}")
-

@@ -3,7 +3,7 @@
 > Securely forward SSH, HTTPS, SOCKS5, and arbitrary TCP traffic through an
 > existing RDP session using RDP virtual channels.
 
-RDPFlux (`rdp2tcp`) carries SSH, HTTPS, SOCKS5, and other TCP streams inside an already
+RDPFlux carries SSH, HTTPS, SOCKS5, and other TCP streams inside an already
 authenticated RDP connection. It does not open an SSH, HTTPS, controller, or
 proxy port on the remote machine's external interfaces. Only the existing RDP
 connection needs to cross the firewall.
@@ -68,12 +68,12 @@ python -m pip install -e .
 
 Copy `examples/client.json` to the default client location if desired:
 
-- Windows: `%LOCALAPPDATA%\rdp2tcp\client.json`
-- Linux: `$XDG_CONFIG_HOME/rdp2tcp/client.json`, normally
-  `~/.config/rdp2tcp/client.json`
+- Windows: `%LOCALAPPDATA%\rdpflux\client.json`
+- Linux: `$XDG_CONFIG_HOME/rdpflux/client.json`, normally
+  `~/.config/rdpflux/client.json`
 
 The agent's optional default configuration is
-`%LOCALAPPDATA%\rdp2tcp\agent.json`.
+`%LOCALAPPDATA%\rdpflux\agent.json`.
 
 ## mstsc setup
 
@@ -81,14 +81,14 @@ Register the client plugin for the current Windows user, then fully close any
 existing `mstsc.exe` processes:
 
 ```powershell
-python -m rdp2tcp.client register
+python -m rdpflux.client register
 ```
 
 Connect to the Windows machine normally with mstsc. Inside that RDP desktop,
 copy or install this package and run:
 
 ```powershell
-python -m rdp2tcp.agent
+python -m rdpflux.agent
 ```
 
 The client plugin is activated by mstsc and loads the default client JSON. With
@@ -101,13 +101,13 @@ ssh -p 2222 user@127.0.0.1
 To debug the client plugin in a foreground console, start it before mstsc:
 
 ```powershell
-python -m rdp2tcp.client run --transport mstsc --config examples/client.json --verbose
+python -m rdpflux.client run --transport mstsc --config examples/client.json --verbose
 ```
 
 Remove its per-user registry entries with:
 
 ```powershell
-python -m rdp2tcp.client unregister
+python -m rdpflux.client unregister
 ```
 
 `--machine` is available for machine-wide registration and requires an
@@ -119,11 +119,14 @@ Install the package or use the standalone Linux client. Put configuration at
 the default Linux path, then launch FreeRDP with its external adapter:
 
 ```text
-xfreerdp /v:windows-host /u:user /rdp2tcp:rdp2tcp-client
+xfreerdp /v:windows-host /u:user /rdp2tcp:rdpflux-client
 ```
 
 Some distributions name the executable `xfreerdp3` or `sdl-freerdp`. Check
 that the client's help includes `/rdp2tcp:<executable path[:arg...]>`.
+The `rdp2tcp` spelling in that option and its static channel is FreeRDP's
+fixed compatibility interface; the RDPFlux package, commands, and files use
+the `rdpflux` name.
 
 Inside the remote Windows RDP session, run the same agent command. Its `auto`
 transport tries the mstsc dynamic channel and then FreeRDP's `rdp2tcp` static
@@ -140,7 +143,7 @@ Client JSON fields are shown in `examples/client.json`. Endpoint strings use
 Rules can also be appended on the command line when running in the foreground:
 
 ```text
-rdp2tcp-client run --transport mstsc \
+rdpflux-client run --transport mstsc \
   --local 127.0.0.1:2222=127.0.0.1:22 \
   --socks 127.0.0.1:1080
 ```
@@ -154,7 +157,7 @@ To reach an internal address from the remote RDP machine, opt it into the
 agent policy. For example:
 
 ```powershell
-rdp2tcp-agent --allow-target 10.20.0.0/16:22-443
+rdpflux-agent --allow-target 10.20.0.0/16:22-443
 ```
 
 To enable a loopback-only reverse rule in client JSON:
@@ -183,8 +186,8 @@ On Windows:
 .\build.ps1 -Install
 ```
 
-This creates `dist\rdp2tcp-client.exe` and `dist\rdp2tcp-agent.exe`. Register
-the packaged client using `rdp2tcp-client.exe register`.
+This creates `dist\rdpflux-client.exe` and `dist\rdpflux-agent.exe`. Register
+the packaged client using `rdpflux-client.exe register`.
 
 On Linux:
 
@@ -192,12 +195,12 @@ On Linux:
 ./build-linux.sh
 ```
 
-This creates `dist/rdp2tcp-client` for FreeRDP.
+This creates `dist/rdpflux-client` for FreeRDP.
 
 ## License and third-party software
 
 This project is distributed under the [MIT License](LICENSE). Copyright (c)
-2026 rdp2tcp contributors.
+2026 RDPFlux contributors.
 
 Runtime and packaged-build components:
 

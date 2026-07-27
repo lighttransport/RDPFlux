@@ -4,10 +4,10 @@ import socket
 
 import pytest
 
-from rdp2tcp.config import AgentConfig, ClientConfig, Endpoint, ForwardRule
-from rdp2tcp.forwarding import AgentForwarder, ClientForwarder
-from rdp2tcp.mux import MuxPeer
-from rdp2tcp.transport import MemoryTransport
+from rdpflux.config import AgentConfig, ClientConfig, Endpoint, ForwardRule
+from rdpflux.forwarding import AgentForwarder, ClientForwarder, bridge_socket
+from rdpflux.mux import MuxPeer, MuxStream
+from rdpflux.transport import MemoryTransport
 
 
 async def start_echo_server():
@@ -59,6 +59,69 @@ async def test_local_forward_large_payload():
 
 
 @pytest.mark.asyncio
+async def test_late_open_result_does_not_close_mux():
+    left, right = MemoryTransport.pair()
+    client = MuxPeer(left, role="client", keepalive_interval=0)
+    agent = MuxPeer(right, role="agent", keepalive_interval=0)
+
+    async def delayed_open(_stream, _metadata):
+        await asyncio.sleep(0.05)
+
+    agent.set_handlers(on_open=delayed_open)
+    await asyncio.gather(client.start(), agent.start())
+    await asyncio.gather(client.wait_ready(), agent.wait_ready())
+    with pytest.raises(asyncio.TimeoutError):
+        await client.open_stream({"kind": "tcp"}, timeout=0.01)
+    await asyncio.sleep(0.1)
+    assert not client._closed.is_set()
+    assert not client.streams
+    await asyncio.gather(client.close(), agent.close())
+
+
+@pytest.mark.asyncio
+async def test_close_tolerates_full_receive_queue():
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client")
+    stream = MuxStream(peer, 1)
+    peer.streams[1] = stream
+    for _ in range(stream._incoming.maxsize):
+        stream._incoming.put_nowait(b"x")
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_bridge_error_unblocks_other_direction():
+    class FailingStream:
+        def __init__(self):
+            self.closed = asyncio.Event()
+        async def write(self, _data):
+            raise ConnectionError("write failed")
+        async def read(self, _size):
+            await self.closed.wait()
+            return b""
+        async def write_eof(self):
+            return None
+        async def close(self, _reason=""):
+            self.closed.set()
+
+    class Writer:
+        def write(self, _data):
+            return None
+        async def drain(self):
+            return None
+        def can_write_eof(self):
+            return False
+        def close(self):
+            return None
+        async def wait_closed(self):
+            return None
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"trigger")
+    await asyncio.wait_for(bridge_socket(reader, Writer(), FailingStream()), 1)
+
+
+@pytest.mark.asyncio
 async def test_socks5_connect():
     echo = await start_echo_server()
     echo_port = echo.sockets[0].getsockname()[1]
@@ -107,4 +170,3 @@ async def test_reverse_forward():
     await agent.close()
     echo.close()
     await echo.wait_closed()
-

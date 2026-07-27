@@ -1,6 +1,6 @@
 import pytest
 
-from rdp2tcp.protocol import Frame, FrameDecoder, MessageType, ProtocolError
+from rdpflux.protocol import Frame, FrameDecoder, MessageType, ProtocolError
 
 
 def test_incremental_frame_decode():
@@ -18,4 +18,3 @@ def test_multiple_frames_and_bad_magic():
     assert [item.kind for item in decoder.feed(data)] == [MessageType.PING, MessageType.PONG]
     with pytest.raises(ProtocolError):
         FrameDecoder().feed(b"BAD!" + data[4:])
-

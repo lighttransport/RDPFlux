@@ -16,7 +16,7 @@ from .registry import PLUGIN_CLSID
 from .transport import CallbackTransport
 
 LOG = logging.getLogger(__name__)
-CHANNEL_NAME = b"com.rdp2tcp.v1"
+CHANNEL_NAME = b"com.rdpflux.v1"
 
 
 class _ChannelRuntime:
@@ -24,8 +24,11 @@ class _ChannelRuntime:
         self.channel = channel
         self.config = config
         self.transport = CallbackTransport(self._write)
-        self.thread = threading.Thread(target=self._thread_main, name="rdp2tcp-dvc", daemon=True)
+        self.thread = threading.Thread(target=self._thread_main, name="rdpflux-dvc", daemon=True)
         self.started = threading.Event()
+        self.closed = threading.Event()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.task: asyncio.Task[None] | None = None
         self.error: Exception | None = None
 
     def start(self) -> None:
@@ -43,19 +46,32 @@ class _ChannelRuntime:
     def feed(self, data: bytes) -> None:
         self.transport.feed_from_thread(data)
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
         self.transport.eof_from_thread()
+        if self.loop and self.task:
+            self.loop.call_soon_threadsafe(self.task.cancel)
+        if self.thread is not threading.current_thread() and self.thread.is_alive():
+            self.thread.join(timeout)
+            if self.thread.is_alive():
+                LOG.warning("mstsc channel runtime did not stop within %.1f seconds", timeout)
 
     def _thread_main(self) -> None:
         try:
             asyncio.run(self._run())
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             self.error = exc
             LOG.exception("mstsc channel runtime failed")
             self.started.set()
+        finally:
+            self.started.set()
+            self.closed.set()
 
     async def _run(self) -> None:
-        self.transport.attach_loop(asyncio.get_running_loop())
+        self.loop = asyncio.get_running_loop()
+        self.task = asyncio.current_task()
+        self.transport.attach_loop(self.loop)
         peer = MuxPeer(self.transport, role="client", max_streams=self.config.max_streams)
         forwarder = ClientForwarder(peer, self.config)
         self.started.set()
@@ -102,7 +118,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False) -> int:
             WM_QUIT,
         )
     except ImportError as exc:
-        raise RuntimeError("mstsc support requires: pip install 'rdp2tcp[mstsc]'") from exc
+        raise RuntimeError("mstsc support requires: pip install 'rdpflux[mstsc]'") from exc
 
     shutdown = threading.Event()
 

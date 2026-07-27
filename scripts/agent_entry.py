@@ -1,5 +1,4 @@
-from rdp2tcp.agent import main
+from rdpflux.agent import main
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
