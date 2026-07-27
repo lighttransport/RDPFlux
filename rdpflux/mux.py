@@ -240,8 +240,10 @@ class MuxPeer:
         try:
             while not self._closed.is_set():
                 await asyncio.sleep(self.keepalive_interval)
-                if time.monotonic() - self._last_received > self.keepalive_timeout:
-                    LOG.warning("%s RDP channel keepalive timed out", self.role)
+                idle = time.monotonic() - self._last_received
+                if idle > self.keepalive_timeout:
+                    LOG.warning("%s RDP channel keepalive timed out after %.1fs idle (limit %.1fs)",
+                                self.role, idle, self.keepalive_timeout)
                     await self.transport.close()
                     return
                 await self._send(Frame(MessageType.PING, payload=encode_control({"time": time.monotonic()})))

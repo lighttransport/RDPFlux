@@ -54,6 +54,11 @@ class ChunkReassembler:
         self._message = bytearray()
         self._max_message = max_message
 
+    @property
+    def pending(self) -> int:
+        """Bytes accumulated for a message that has not seen CHANNEL_FLAG_LAST."""
+        return len(self._message)
+
     def feed(self, chunk: bytes) -> bytes | None:
         """Return the completed message, or None while more chunks are pending."""
         if len(chunk) < CHANNEL_PDU_HEADER.size:
@@ -145,7 +150,12 @@ class WTSChannelTransport(AsyncTransport):
                     LOG.debug("channel read %d bytes: %s", len(data), data[:32].hex(" "))
                     message = self._reassembler.feed(data)
                     if message is None:
-                        continue  # mid-message; wait for the remaining chunks
+                        # Mid-message; wait for the remaining chunks. A message that
+                        # never completes stalls this loop, which starves the mux
+                        # keepalive, so make the pending state visible.
+                        LOG.debug("chunk incomplete; %d bytes pending reassembly",
+                                  self._reassembler.pending)
+                        continue
                     return message
                 continue
             if error in BENIGN_READ_ERRORS:

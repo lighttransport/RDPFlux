@@ -162,3 +162,13 @@ def test_oversized_message_is_rejected():
     reassembler = ChunkReassembler(max_message=16)
     with pytest.raises(WTSError, match="exceeds"):
         reassembler.feed(chunk(b"x", 1024, CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST))
+
+
+def test_pending_tracks_incomplete_reassembly():
+    """A message that never completes stalls the read loop and starves the keepalive."""
+    reassembler = ChunkReassembler()
+    assert reassembler.pending == 0
+    assert reassembler.feed(chunk(b"half", 8, CHANNEL_FLAG_FIRST)) is None
+    assert reassembler.pending == 4, "partial message must be visible"
+    assert reassembler.feed(chunk(b"done", 8, CHANNEL_FLAG_LAST)) == b"halfdone"
+    assert reassembler.pending == 0, "state must clear once the message completes"
