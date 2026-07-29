@@ -6,7 +6,7 @@ import pytest
 
 from rdpflux.config import AgentConfig, ClientConfig, Endpoint, ForwardRule
 from rdpflux.forwarding import AgentForwarder, ClientForwarder, bridge_socket
-from rdpflux.mux import CHUNK_SIZE, INITIAL_WINDOW, MuxPeer, MuxStream
+from rdpflux.mux import CHUNK_SIZE, INITIAL_WINDOW, MAX_BUFFERED_DATA, MuxPeer, MuxStream
 from rdpflux.transport import MemoryTransport
 
 
@@ -301,6 +301,85 @@ async def test_receive_window_is_enforced():
     with pytest.raises(ProtocolError, match="receive window"):
         await stream._receive(b"x")
     await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_close_while_waiting_for_aggregate_credit_does_not_underflow():
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client", keepalive_interval=0)
+    peer._outgoing_buffered = MAX_BUFFERED_DATA
+    stream = MuxStream(peer, 1)
+    peer.streams[1] = stream
+
+    writer = asyncio.create_task(stream.write(b"x" * CHUNK_SIZE))
+    await asyncio.sleep(0)  # writer deducts stream credit, then blocks on aggregate credit
+    await stream.close("test close")
+    result = await asyncio.gather(writer, return_exceptions=True)
+    await asyncio.sleep(0)  # allow aggregate-credit notifications to run
+
+    assert isinstance(result[0], ConnectionError)
+    assert peer._outgoing_buffered == MAX_BUFFERED_DATA
+    assert stream._outgoing_reserved == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_waiting_for_aggregate_credit_restores_stream_credit():
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client", keepalive_interval=0)
+    peer._outgoing_buffered = MAX_BUFFERED_DATA
+    stream = MuxStream(peer, 1)
+    peer.streams[1] = stream
+
+    writer = asyncio.create_task(stream.write(b"x" * CHUNK_SIZE))
+    await asyncio.sleep(0)
+    writer.cancel()
+    result = await asyncio.gather(writer, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert stream._send_credit == INITIAL_WINDOW
+    assert stream._outgoing_reserved == 0
+    assert peer._outgoing_buffered == MAX_BUFFERED_DATA
+
+
+@pytest.mark.asyncio
+async def test_write_eof_waits_for_an_active_write():
+    from rdpflux.protocol import FrameDecoder, MessageType
+    from rdpflux.transport import AsyncTransport
+
+    class GatedTransport(AsyncTransport):
+        def __init__(self):
+            self.frames = []
+            self.first_data = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def read(self):
+            return b""
+
+        async def write(self, data):
+            self.frames.extend(FrameDecoder().feed(data))
+            data_frames = [frame for frame in self.frames if frame.kind == MessageType.DATA]
+            if self.frames[-1].kind == MessageType.DATA and len(data_frames) == 1:
+                self.first_data.set()
+                await self.release.wait()
+
+        async def close(self):
+            pass
+
+    transport = GatedTransport()
+    peer = MuxPeer(transport, role="client", keepalive_interval=0)
+    stream = MuxStream(peer, 1)
+    peer.streams[1] = stream
+
+    writer = asyncio.create_task(stream.write(b"x" * (CHUNK_SIZE * 2)))
+    await transport.first_data.wait()
+    eof = asyncio.create_task(stream.write_eof())
+    await asyncio.sleep(0)
+    transport.release.set()
+    await asyncio.gather(writer, eof)
+
+    assert [frame.kind for frame in transport.frames] == [
+        MessageType.DATA, MessageType.DATA, MessageType.HALF_CLOSE,
+    ]
 
 
 @pytest.mark.asyncio

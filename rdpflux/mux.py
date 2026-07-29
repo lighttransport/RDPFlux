@@ -38,8 +38,10 @@ class MuxStream:
         self._read_buffer = bytearray()
         self._readable = asyncio.Event()
         self._send_credit = INITIAL_WINDOW
+        self._outgoing_reserved = 0
         self._receive_credit = INITIAL_WINDOW
         self._credit_changed = asyncio.Condition()
+        self._write_serial = asyncio.Lock()
         self._local_eof = False
         self._remote_eof = False
         self._closed = False
@@ -81,6 +83,10 @@ class MuxStream:
         return data
 
     async def write(self, data: bytes) -> None:
+        async with self._write_serial:
+            await self._write_serialized(data)
+
+    async def _write_serialized(self, data: bytes) -> None:
         if self._local_eof or self._closed:
             raise StreamClosed("stream is not writable")
         view = memoryview(data)
@@ -94,26 +100,36 @@ class MuxStream:
                     raise StreamClosed("stream closed while waiting for credit")
                 count = min(CHUNK_SIZE, self._send_credit, len(view) - offset)
                 self._send_credit -= count
-            await self.peer._reserve_outgoing(count, self)
+            try:
+                await self.peer._reserve_outgoing(count, self)
+            except BaseException:
+                if not self._closed:
+                    async with self._credit_changed:
+                        self._send_credit += count
+                        self._credit_changed.notify_all()
+                raise
+            self._outgoing_reserved += count
             if self._closed or self.peer.closed:
-                self.peer._release_outgoing(count)
+                self._release_outgoing_reserved(count)
                 raise StreamClosed("stream closed before data could be sent")
             try:
                 await self.peer._send(Frame(
                     MessageType.DATA, self.stream_id, bytes(view[offset:offset + count]),
                 ))
             except BaseException:
-                self.peer._release_outgoing(count)
-                async with self._credit_changed:
-                    self._send_credit += count
-                    self._credit_changed.notify_all()
+                self._release_outgoing_reserved(count)
+                if not self._closed:
+                    async with self._credit_changed:
+                        self._send_credit += count
+                        self._credit_changed.notify_all()
                 raise
             offset += count
 
     async def write_eof(self) -> None:
-        if not self._local_eof and not self._closed:
-            self._local_eof = True
-            await self.peer._send(Frame(MessageType.HALF_CLOSE, self.stream_id))
+        async with self._write_serial:
+            if not self._local_eof and not self._closed:
+                self._local_eof = True
+                await self.peer._send(Frame(MessageType.HALF_CLOSE, self.stream_id))
 
     async def close(self, reason: str = "") -> None:
         if self._closed:
@@ -149,12 +165,12 @@ class MuxStream:
 
     async def _add_credit(self, amount: int) -> None:
         outstanding = INITIAL_WINDOW - self._send_credit
-        if amount <= 0 or amount > outstanding:
+        if amount <= 0 or amount > outstanding or amount > self._outgoing_reserved:
             raise ProtocolError("invalid window update")
         async with self._credit_changed:
             self._send_credit += amount
             self._credit_changed.notify_all()
-        self.peer._release_outgoing(amount)
+        self._release_outgoing_reserved(amount)
 
     async def _remote_close(self, reason: str = "") -> None:
         if self._closed:
@@ -164,10 +180,9 @@ class MuxStream:
             # already delivered before HALF_CLOSE until the application reads it.
             self._closed = True
             self._close_reason = reason[:512]
-            outstanding = INITIAL_WINDOW - self._send_credit
-            if outstanding:
+            if self._send_credit != INITIAL_WINDOW:
                 self._send_credit = INITIAL_WINDOW
-                self.peer._release_outgoing(outstanding)
+            self._release_outgoing_reserved()
             if not self._read_buffer:
                 self.peer._remove_stream(self.stream_id)
             self._readable.set()
@@ -190,10 +205,9 @@ class MuxStream:
             self._read_buffer.clear()
             self._receive_credit = min(INITIAL_WINDOW, self._receive_credit + buffered)
             self.peer._release_incoming(buffered)
-        outstanding = INITIAL_WINDOW - self._send_credit
-        if outstanding:
+        if self._send_credit != INITIAL_WINDOW:
             self._send_credit = INITIAL_WINDOW
-            self.peer._release_outgoing(outstanding)
+        self._release_outgoing_reserved()
         self.peer._remove_stream(self.stream_id)
         self._readable.set()
 
@@ -203,6 +217,15 @@ class MuxStream:
 
         with contextlib.suppress(RuntimeError):
             asyncio.create_task(notify())
+
+    def _release_outgoing_reserved(self, amount: int | None = None) -> int:
+        release = self._outgoing_reserved if amount is None else min(amount, self._outgoing_reserved)
+        if release:
+            self._outgoing_reserved -= release
+        # A zero-byte release still wakes writers whose stream closed while they
+        # were waiting for aggregate credit.
+        self.peer._release_outgoing(release)
+        return release
 
 
 class MuxPeer:
