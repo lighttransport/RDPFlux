@@ -40,6 +40,12 @@ class Frame:
     flags: int = 0
 
     def encode(self) -> bytes:
+        if isinstance(self.stream_id, bool) or not isinstance(self.stream_id, int) or not 0 <= self.stream_id <= 0xFFFFFFFF:
+            raise ProtocolError("stream ID is outside uint32 range")
+        if isinstance(self.flags, bool) or not isinstance(self.flags, int) or not 0 <= self.flags <= 0xFFFF:
+            raise ProtocolError("frame flags are outside uint16 range")
+        if not isinstance(self.payload, bytes):
+            raise ProtocolError("frame payload must be bytes")
         if len(self.payload) > MAX_PAYLOAD:
             raise ProtocolError(f"payload exceeds {MAX_PAYLOAD} bytes")
         return HEADER.pack(MAGIC, VERSION, int(self.kind), self.flags, self.stream_id, len(self.payload)) + self.payload
@@ -95,4 +101,3 @@ def decode_control(data: bytes) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProtocolError("control payload must be an object")
     return value
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import sys
 
@@ -52,6 +53,8 @@ def _control_service(config):
 
 
 async def _run(args) -> None:
+    if not math.isfinite(args.retry) or args.retry <= 0:
+        raise ValueError("--retry must be a finite positive number")
     config = load_agent_config(optional_config(args.config, default_agent_config()))
     config.allow_targets.extend(parse_allowed_target(value) for value in args.allow_target)
     config.enable_reverse = config.enable_reverse or args.enable_reverse
@@ -71,7 +74,10 @@ async def _run(args) -> None:
                 await forwarder.start()
                 logging.info("tunnel ready on %s; waiting for streams", transport.channel_name)
                 await peer.wait_closed()
-                logging.info("RDP channel closed by the peer")
+                if peer.close_error is None:
+                    logging.info("RDP channel closed by the peer")
+                else:
+                    logging.warning("RDP channel failed: %s", describe_exception(peer.close_error))
             finally:
                 await forwarder.close()
         except Exception as exc:

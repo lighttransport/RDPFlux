@@ -28,7 +28,6 @@ def test_channel_runtime_close_joins_worker():
     runtime.close()
     assert runtime.closed.is_set()
     assert not runtime.thread.is_alive()
-    assert runtime.restarts == 0
 
 
 def test_channel_write_uses_ubyte_buffer():
@@ -52,25 +51,44 @@ def test_channel_write_uses_ubyte_buffer():
     assert len(captured) == 1, "empty writes must not reach the channel"
 
 
-def test_channel_runtime_restarts_then_gives_up():
+def test_channel_write_splits_at_the_dvc_limit():
+    from rdpflux.mstsc_plugin import DVC_WRITE_CHUNK_LENGTH
+
+    captured = []
+
+    class Channel:
+        @staticmethod
+        def Write(size, buffer, _reserved):
+            captured.append(bytes(buffer[:size]))
+            return 0
+
+    payload = bytes(range(256)) * 20
+    _ChannelRuntime(Channel(), ClientConfig())._write(payload)
+    assert all(len(chunk) <= DVC_WRITE_CHUNK_LENGTH for chunk in captured)
+    assert b"".join(captured) == payload
+
+
+def test_channel_runtime_failure_closes_the_dvc():
     attempts = []
-    lock = threading.Lock()
+    closed = threading.Event()
 
     class Channel:
         @staticmethod
         def Write(_size, _buffer, _reserved):
-            with lock:
-                attempts.append(1)
+            attempts.append(1)
             raise OSError("channel write failed")
 
-    runtime = _ChannelRuntime(Channel(), ClientConfig(), max_restarts=2, restart_backoff=0.01)
+        @staticmethod
+        def Close():
+            closed.set()
+
+    runtime = _ChannelRuntime(Channel(), ClientConfig())
     runtime.start()
     runtime.thread.join(15)
     assert not runtime.thread.is_alive()
     assert runtime.closed.is_set()
-    assert runtime.restarts == 2, "should retry up to max_restarts before giving up"
-    # The first HELLO plus one per restart.
-    assert len(attempts) == 3
+    assert len(attempts) == 1
+    assert closed.is_set(), "a failed mux must reconnect on a fresh DVC"
 
 
 def test_channel_runtime_startup_failure_is_raised():
@@ -79,12 +97,11 @@ def test_channel_runtime_startup_failure_is_raised():
         def Write(_size, _buffer, _reserved):
             return 0
 
-    runtime = _ChannelRuntime(Channel(), ClientConfig(), max_restarts=1, restart_backoff=0.01)
+    runtime = _ChannelRuntime(Channel(), ClientConfig())
     runtime.config = None  # forces MuxPeer construction to fail before started is set
     with pytest.raises(Exception):
         runtime.start()
     runtime.close()
-    assert runtime.restarts == 0, "pre-handshake failures must not trigger restarts"
 
 
 def test_config_reloader_picks_up_edits_per_channel():

@@ -49,6 +49,11 @@ checked against that allowlist.
 Reverse forwarding is disabled on the agent by default. Non-loopback reverse
 listeners require a second explicit opt-in.
 
+Each stream has a 256 KiB flow-control window. The mux additionally caps
+aggregate buffered data at 32 MiB, and the mstsc callback adapter closes an
+overloaded channel instead of growing an unbounded queue. `max_streams` limits
+both mux streams and accepted forwarding work; its default is 128.
+
 ## Install from source
 
 Python 3.10 or newer is required.
@@ -147,6 +152,12 @@ rdpflux-client run --transport mstsc \
   --local 127.0.0.1:2222=127.0.0.1:22 \
   --socks 127.0.0.1:1080
 ```
+
+The optional client `limits` object accepts `max_streams` (`1..4096`),
+`connect_timeout` (a positive value up to 300 seconds), and `idle_timeout`
+(zero disables it). The same bounds apply to the agent's top-level
+`max_streams` and `connect_timeout`. Configuration values are type-checked;
+strings such as `"false"` or `"15"` are not treated as booleans or numbers.
 
 SOCKS5 supports unauthenticated TCP `CONNECT` with IPv4, IPv6, and domain
 targets. SOCKS `BIND`, UDP, and username/password authentication are not
@@ -291,10 +302,13 @@ upstream license texts when redistributing dependencies separately.
 
 - Run the agent inside the interactive RDP session, not at the physical console
   and not as a Windows service.
-- Configuration is loaded when the client/plugin starts. Restart mstsc to pick
-  up changes to an automatically activated plugin.
+- The mstsc plugin reloads client configuration for each newly opened RDP
+  channel. Existing listeners keep their current configuration until the
+  channel reconnects. The agent loads its configuration once at startup.
 - Existing TCP streams close when RDP disconnects. The agent retries channel
   attachment; newly accepted connections work after RDP reconnects.
+- A fatal mux or callback error closes the current virtual channel and reconnects
+  on a fresh channel; protocol state is never restarted inside a damaged DVC.
 - If the mstsc channel does not open, confirm the plugin is registered under
   the same Windows user and restart all mstsc processes.
 - If an agent connection is denied, add only the required CIDR and port range
@@ -310,8 +324,18 @@ python -m pytest -q
 ```
 
 The tests exercise incremental framing, policy validation, multiplexing,
-backpressure with a megabyte-scale stream, and SOCKS5 over an in-memory RDP
-transport.
+backpressure with a megabyte-scale stream, request timeouts, bounded callback
+buffering, and SOCKS5 over an in-memory RDP transport. Interactive capture and
+input tests are opt-in so headless Windows CI remains reliable:
+
+```powershell
+$env:RDPFLUX_RUN_DESKTOP_TESTS = "1"
+python -m pytest -q tests/test_control_windows.py
+```
+
+Before release, exercise both mstsc and FreeRDP with parallel checksum-verified
+transfers, TCP half-close, more than 60 seconds idle, and repeated RDP
+disconnect/reconnect cycles.
 
 The design was informed by the original
 [`NotMedic/rdp-tunnel`](https://github.com/NotMedic/rdp-tunnel), current

@@ -2,7 +2,15 @@ import asyncio
 
 import pytest
 
-from rdpflux.config import AgentConfig, ConfigError, Endpoint, parse_allowed_target, parse_endpoint
+from rdpflux.config import (
+    AgentConfig,
+    ConfigError,
+    Endpoint,
+    load_agent_config,
+    load_client_config,
+    parse_allowed_target,
+    parse_endpoint,
+)
 from rdpflux.policy import PolicyDenied, resolve_allowed
 
 
@@ -27,3 +35,27 @@ async def test_default_policy_allows_loopback_and_denies_external():
     assert await resolve_allowed(Endpoint("127.0.0.1", 22), cfg)
     with pytest.raises(PolicyDenied):
         await resolve_allowed(Endpoint("192.0.2.1", 22), cfg)
+
+
+def test_configuration_rejects_coerced_and_non_finite_limits(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text('{"limits":{"max_streams":true}}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="integer"):
+        load_client_config(client)
+    client.write_text('{"limits":{"connect_timeout":"15"}}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="number"):
+        load_client_config(client)
+
+    agent = tmp_path / "agent.json"
+    agent.write_text('{"enable_reverse":"false"}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="boolean"):
+        load_agent_config(agent)
+
+
+def test_configuration_rejects_malformed_collections(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text('{"socks":{},"local_forwards":{}}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="array"):
+        load_client_config(client)
+    with pytest.raises(ConfigError, match="port range"):
+        parse_allowed_target("127.0.0.1:nope")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ class Endpoint:
 
 
 def parse_endpoint(value: str, *, default_host: str | None = None) -> Endpoint:
+    if not isinstance(value, str):
+        raise ConfigError("endpoint must be a string")
     value = value.strip()
     if value.startswith("["):
         end = value.find("]")
@@ -34,10 +37,14 @@ def parse_endpoint(value: str, *, default_host: str | None = None) -> Endpoint:
         host, raw_port = default_host, value
     else:
         raise ConfigError(f"endpoint requires host and port: {value}")
+    host = host.strip()
+    raw_port = raw_port.strip()
     if not host:
         if default_host is None:
             raise ConfigError(f"endpoint has an empty host: {value}")
         host = default_host
+    if any(ord(character) < 32 or ord(character) == 127 for character in host):
+        raise ConfigError("endpoint host contains control characters")
     try:
         port = int(raw_port)
     except ValueError as exc:
@@ -116,29 +123,83 @@ def _load_json(path: str | Path | None) -> dict[str, Any]:
 def _rule(value: Any, label: str) -> ForwardRule:
     if not isinstance(value, dict) or not isinstance(value.get("listen"), str) or not isinstance(value.get("target"), str):
         raise ConfigError(f"{label} entries require string listen and target fields")
-    return ForwardRule(parse_endpoint(value["listen"]), parse_endpoint(value["target"]), str(value.get("name", "")))
+    name = value.get("name", "")
+    if not isinstance(name, str):
+        raise ConfigError(f"{label} entry names must be strings")
+    return ForwardRule(parse_endpoint(value["listen"]), parse_endpoint(value["target"]), name)
+
+
+def _array(raw: dict[str, Any], name: str) -> list[Any]:
+    value = raw.get(name, [])
+    if not isinstance(value, list):
+        raise ConfigError(f"{name} must be an array")
+    return value
+
+
+def _integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _number(value: Any, name: str, *, minimum: float, maximum: float | None = None,
+            allow_zero: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be a number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ConfigError(f"{name} must be finite")
+    if result < minimum or (result == 0 and not allow_zero):
+        qualifier = "non-negative" if allow_zero and minimum == 0 else f"greater than {minimum}"
+        raise ConfigError(f"{name} must be {qualifier}")
+    if maximum is not None and result > maximum:
+        raise ConfigError(f"{name} must not exceed {maximum}")
+    return result
+
+
+def _boolean(raw: dict[str, Any], name: str, default: bool) -> bool:
+    value = raw.get(name, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be a boolean")
+    return value
 
 
 def load_client_config(path: str | Path | None) -> ClientConfig:
     raw = _load_json(path)
     cfg = ClientConfig()
-    cfg.local_forwards = [_rule(v, "local_forwards") for v in raw.get("local_forwards", [])]
-    cfg.reverse_forwards = [_rule(v, "reverse_forwards") for v in raw.get("reverse_forwards", [])]
-    cfg.socks = [parse_endpoint(v if isinstance(v, str) else v.get("listen", "")) for v in raw.get("socks", [])]
+    cfg.local_forwards = [_rule(v, "local_forwards") for v in _array(raw, "local_forwards")]
+    cfg.reverse_forwards = [_rule(v, "reverse_forwards") for v in _array(raw, "reverse_forwards")]
+    cfg.socks = []
+    for value in _array(raw, "socks"):
+        if isinstance(value, str):
+            listen = value
+        elif isinstance(value, dict) and isinstance(value.get("listen"), str):
+            listen = value["listen"]
+        else:
+            raise ConfigError("socks entries must be endpoint strings or objects with a string listen field")
+        cfg.socks.append(parse_endpoint(listen))
     control = raw.get("control")
     if isinstance(control, dict):
         listen = control.get("listen")
         if isinstance(listen, str) and listen:
             cfg.control_listen = parse_endpoint(listen, default_host="127.0.0.1")
-        cfg.control_token = str(control.get("token", ""))
+        token = control.get("token", "")
+        if not isinstance(token, str):
+            raise ConfigError("control.token must be a string")
+        cfg.control_token = token
+    elif control is not None:
+        raise ConfigError("control must be an object")
     limits = raw.get("limits", {})
     if not isinstance(limits, dict):
         raise ConfigError("limits must be an object")
-    cfg.max_streams = int(limits.get("max_streams", cfg.max_streams))
-    cfg.connect_timeout = float(limits.get("connect_timeout", cfg.connect_timeout))
-    cfg.idle_timeout = float(limits.get("idle_timeout", cfg.idle_timeout))
-    if not 1 <= cfg.max_streams <= 4096:
-        raise ConfigError("max_streams must be between 1 and 4096")
+    cfg.max_streams = _integer(limits.get("max_streams", cfg.max_streams), "limits.max_streams",
+                               minimum=1, maximum=4096)
+    cfg.connect_timeout = _number(limits.get("connect_timeout", cfg.connect_timeout),
+                                  "limits.connect_timeout", minimum=0, maximum=300)
+    cfg.idle_timeout = _number(limits.get("idle_timeout", cfg.idle_timeout),
+                               "limits.idle_timeout", minimum=0, allow_zero=True)
     return cfg
 
 
@@ -156,13 +217,16 @@ def parse_allowed_target(value: str) -> AllowedTarget:
             raise ConfigError(f"invalid network in allow-target: {value}") from exc
     else:
         network = candidate
-    if port_part == "*":
-        first, last = 1, 65535
-    elif "-" in port_part:
-        a, b = port_part.split("-", 1)
-        first, last = int(a), int(b)
-    else:
-        first = last = int(port_part)
+    try:
+        if port_part == "*":
+            first, last = 1, 65535
+        elif "-" in port_part:
+            a, b = port_part.split("-", 1)
+            first, last = int(a), int(b)
+        else:
+            first = last = int(port_part)
+    except ValueError as exc:
+        raise ConfigError(f"invalid port range in allow-target: {value}") from exc
     if not 1 <= first <= last <= 65535:
         raise ConfigError(f"invalid port range in allow-target: {value}")
     return AllowedTarget(network, first, last)
@@ -175,12 +239,17 @@ def load_agent_config(path: str | Path | None) -> AgentConfig:
         if not isinstance(raw["allow_targets"], list):
             raise ConfigError("allow_targets must be an array")
         cfg.allow_targets = [parse_allowed_target(str(v)) for v in raw["allow_targets"]]
-    cfg.enable_reverse = bool(raw.get("enable_reverse", cfg.enable_reverse))
-    cfg.allow_nonloopback_reverse = bool(raw.get("allow_nonloopback_reverse", cfg.allow_nonloopback_reverse))
-    cfg.enable_control = bool(raw.get("enable_control", cfg.enable_control))
-    cfg.enable_exec = bool(raw.get("enable_exec", cfg.enable_exec))
-    cfg.enable_file_transfer = bool(raw.get("enable_file_transfer", cfg.enable_file_transfer))
-    cfg.file_root = str(raw.get("file_root", cfg.file_root))
-    cfg.max_streams = int(raw.get("max_streams", cfg.max_streams))
-    cfg.connect_timeout = float(raw.get("connect_timeout", cfg.connect_timeout))
+    cfg.enable_reverse = _boolean(raw, "enable_reverse", cfg.enable_reverse)
+    cfg.allow_nonloopback_reverse = _boolean(raw, "allow_nonloopback_reverse", cfg.allow_nonloopback_reverse)
+    cfg.enable_control = _boolean(raw, "enable_control", cfg.enable_control)
+    cfg.enable_exec = _boolean(raw, "enable_exec", cfg.enable_exec)
+    cfg.enable_file_transfer = _boolean(raw, "enable_file_transfer", cfg.enable_file_transfer)
+    file_root = raw.get("file_root", cfg.file_root)
+    if not isinstance(file_root, str):
+        raise ConfigError("file_root must be a string")
+    cfg.file_root = file_root
+    cfg.max_streams = _integer(raw.get("max_streams", cfg.max_streams), "max_streams",
+                               minimum=1, maximum=4096)
+    cfg.connect_timeout = _number(raw.get("connect_timeout", cfg.connect_timeout),
+                                  "connect_timeout", minimum=0, maximum=300)
     return cfg

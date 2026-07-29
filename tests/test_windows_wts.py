@@ -123,6 +123,7 @@ def _fake_transport():
     transport = object.__new__(WTSChannelTransport)
     transport.handle = 1
     transport.channel_name = "test"
+    transport._closed = False
     transport._write_buffer = ctypes.create_string_buffer(CHANNEL_CHUNK_LENGTH)
     transport._io_lock = threading.Lock()
     writes = []
@@ -172,3 +173,18 @@ def test_pending_tracks_incomplete_reassembly():
     assert reassembler.pending == 4, "partial message must be visible"
     assert reassembler.feed(chunk(b"done", 8, CHANNEL_FLAG_LAST)) == b"halfdone"
     assert reassembler.pending == 0, "state must clear once the message completes"
+
+
+def test_continuation_requires_first_and_consistent_length():
+    reassembler = ChunkReassembler()
+    with pytest.raises(WTSError, match="CHANNEL_FLAG_FIRST"):
+        reassembler.feed(chunk(b"late", 4, CHANNEL_FLAG_LAST))
+    assert reassembler.feed(chunk(b"half", 8, CHANNEL_FLAG_FIRST)) is None
+    with pytest.raises(WTSError, match="changed"):
+        reassembler.feed(chunk(b"done", 9, CHANNEL_FLAG_LAST))
+    assert reassembler.pending == 0
+
+
+def test_zero_length_message_is_rejected():
+    with pytest.raises(WTSError, match="zero-length"):
+        ChunkReassembler().feed(chunk(b"", 0, CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST))

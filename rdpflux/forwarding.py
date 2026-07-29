@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import AgentConfig, ClientConfig, Endpoint, ForwardRule
-from .mux import MuxPeer, MuxStream, describe_exception
+from .mux import MuxPeer, MuxStream, StreamClosed, describe_exception
 from .policy import resolve_allowed, validate_reverse_listener
 
 LOG = logging.getLogger(__name__)
@@ -20,57 +20,64 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     loop = asyncio.get_running_loop()
     last_activity = loop.time()
 
-    async def abort(reason: str) -> None:
-        with contextlib.suppress(Exception):
-            await stream.close(reason)
-        writer.close()
-
     async def socket_to_mux() -> None:
         nonlocal last_activity
-        try:
-            while data := await reader.read(16 * 1024):
-                last_activity = loop.time()
-                await stream.write(data)
-            await stream.write_eof()
-        except (ConnectionError, OSError) as exc:
-            await abort(str(exc))
+        while data := await reader.read(16 * 1024):
+            last_activity = loop.time()
+            await stream.write(data)
+        await stream.write_eof()
 
     async def mux_to_socket() -> None:
         nonlocal last_activity
-        try:
-            while data := await stream.read(16 * 1024):
-                last_activity = loop.time()
-                writer.write(data)
-                await writer.drain()
-            if writer.can_write_eof():
-                writer.write_eof()
-                await writer.drain()
-        except (ConnectionError, OSError) as exc:
-            await abort(str(exc))
+        while data := await stream.read(16 * 1024):
+            last_activity = loop.time()
+            writer.write(data)
+            await writer.drain()
+        if stream.remote_reset:
+            raise StreamClosed(stream.close_reason or "mux stream reset by peer")
+        if writer.can_write_eof():
+            writer.write_eof()
+            await writer.drain()
 
     async def idle_monitor() -> None:
-        if idle_timeout <= 0:
-            return
         while True:
             await asyncio.sleep(min(1.0, idle_timeout))
             if loop.time() - last_activity >= idle_timeout:
-                await abort("idle timeout")
-                return
+                raise TimeoutError("idle timeout")
 
-    tasks = [asyncio.create_task(socket_to_mux()), asyncio.create_task(mux_to_socket())]
+    pumps = {asyncio.create_task(socket_to_mux()), asyncio.create_task(mux_to_socket())}
     monitor = asyncio.create_task(idle_monitor()) if idle_timeout > 0 else None
+    abort_reason = ""
     try:
-        await asyncio.gather(*tasks)
+        pending = set(pumps)
+        watched = set(pumps)
+        if monitor:
+            watched.add(monitor)
+        while pending:
+            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                watched.discard(task)
+                pending.discard(task)
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    abort_reason = describe_exception(exc)
+                    pending.clear()
+                    break
+    except asyncio.CancelledError:
+        abort_reason = "bridge cancelled"
+        raise
     finally:
         if monitor:
             monitor.cancel()
-        for task in tasks:
+        for task in pumps:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*pumps, return_exceptions=True)
         if monitor:
             await asyncio.gather(monitor, return_exceptions=True)
         with contextlib.suppress(Exception):
-            await stream.close()
+            await stream.close(abort_reason)
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()
@@ -91,19 +98,26 @@ class ClientForwarder:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
+    def _accept(self, coroutine: Any, writer: asyncio.StreamWriter) -> None:
+        if len(self.tasks) >= self.config.max_streams:
+            coroutine.close()
+            writer.close()
+            return
+        self._spawn(coroutine)
+
     async def start(self) -> None:
         await self.peer.start()
         await self.peer.wait_ready()
         for rule in self.config.local_forwards:
             server = await asyncio.start_server(
-                lambda r, w, item=rule: self._spawn(self._handle_local(r, w, item)),
+                lambda r, w, item=rule: self._accept(self._handle_local(r, w, item), w),
                 rule.listen.host, rule.listen.port,
             )
             self.servers.append(server)
             LOG.info("local forward %s -> %s", rule.listen, rule.target)
         for endpoint in self.config.socks:
             server = await asyncio.start_server(
-                lambda r, w: self._spawn(self._handle_socks(r, w)), endpoint.host, endpoint.port,
+                lambda r, w: self._accept(self._handle_socks(r, w), w), endpoint.host, endpoint.port,
             )
             self.servers.append(server)
             LOG.info("SOCKS5 listening on %s", endpoint)
@@ -141,31 +155,12 @@ class ClientForwarder:
     async def _handle_socks(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         stream: MuxStream | None = None
         try:
-            version, methods_count = await reader.readexactly(2)
-            methods = await reader.readexactly(methods_count)
-            if version != 5 or 0 not in methods:
-                writer.write(b"\x05\xff")
-                await writer.drain()
+            target = await asyncio.wait_for(
+                self._read_socks_target(reader, writer), self.config.connect_timeout,
+            )
+            if target is None:
                 return
-            writer.write(b"\x05\x00")
-            await writer.drain()
-            version, command, reserved, address_type = await reader.readexactly(4)
-            if version != 5 or command != 1 or reserved != 0:
-                await self._socks_reply(writer, 7)
-                return
-            if address_type == 1:
-                host = socket.inet_ntop(socket.AF_INET, await reader.readexactly(4))
-            elif address_type == 4:
-                host = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
-            elif address_type == 3:
-                length = (await reader.readexactly(1))[0]
-                if length == 0:
-                    raise ValueError("empty SOCKS hostname")
-                host = (await reader.readexactly(length)).decode("idna")
-            else:
-                await self._socks_reply(writer, 8)
-                return
-            (port,) = struct.unpack("!H", await reader.readexactly(2))
+            host, port = target
             stream = await self.peer.open_stream({"kind": "tcp", "host": host, "port": port}, self.config.connect_timeout)
             await self._socks_reply(writer, 0)
             await bridge_socket(reader, writer, stream, self.config.idle_timeout)
@@ -182,6 +177,38 @@ class ClientForwarder:
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
 
+    async def _read_socks_target(self, reader: asyncio.StreamReader,
+                                 writer: asyncio.StreamWriter) -> tuple[str, int] | None:
+        version, methods_count = await reader.readexactly(2)
+        methods = await reader.readexactly(methods_count)
+        if version != 5 or 0 not in methods:
+            writer.write(b"\x05\xff")
+            await writer.drain()
+            return None
+        writer.write(b"\x05\x00")
+        await writer.drain()
+        version, command, reserved, address_type = await reader.readexactly(4)
+        if version != 5 or command != 1 or reserved != 0:
+            await self._socks_reply(writer, 7)
+            return None
+        if address_type == 1:
+            host = socket.inet_ntop(socket.AF_INET, await reader.readexactly(4))
+        elif address_type == 4:
+            host = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
+        elif address_type == 3:
+            length = (await reader.readexactly(1))[0]
+            if length == 0:
+                raise ValueError("empty SOCKS hostname")
+            host = (await reader.readexactly(length)).decode("idna")
+        else:
+            await self._socks_reply(writer, 8)
+            return None
+        (port,) = struct.unpack("!H", await reader.readexactly(2))
+        if port == 0:
+            await self._socks_reply(writer, 8)
+            return None
+        return host, port
+
     @staticmethod
     async def _socks_reply(writer: asyncio.StreamWriter, status: int) -> None:
         writer.write(bytes((5, status, 0, 1)) + b"\x00\x00\x00\x00\x00\x00")
@@ -197,6 +224,11 @@ class ClientForwarder:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(target.host, target.port), self.config.connect_timeout,
         )
+        if len(self.tasks) >= self.config.max_streams:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            raise ConnectionError("forwarding task limit reached")
         self._spawn(bridge_socket(reader, writer, stream, self.config.idle_timeout))
 
     async def close(self) -> None:
@@ -211,6 +243,7 @@ class ClientForwarder:
 
 @dataclass(slots=True)
 class _ReverseListener:
+    request_id: int
     rule_id: str
     server: asyncio.AbstractServer
 
@@ -221,13 +254,22 @@ class AgentForwarder:
         self.config = config
         self.control = control
         self.listeners: dict[str, _ReverseListener] = {}
+        self.listeners_by_request: dict[int, _ReverseListener] = {}
         self.tasks: set[asyncio.Task[Any]] = set()
-        self.peer.set_handlers(on_open=self._on_open, on_listen=self._on_listen)
+        self.peer.set_handlers(on_open=self._on_open, on_listen=self._on_listen,
+                               on_cancel_listen=self._cancel_listener)
 
     def _spawn(self, coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+
+    def _accept(self, coroutine: Any, writer: asyncio.StreamWriter) -> None:
+        if len(self.tasks) >= self.config.max_streams:
+            coroutine.close()
+            writer.close()
+            return
+        self._spawn(coroutine)
 
     async def start(self) -> None:
         await self.peer.start()
@@ -249,14 +291,22 @@ class AgentForwarder:
         if metadata.get("kind") == "control":
             if not self.config.enable_control or self.control is None:
                 raise ValueError("desktop control is disabled")
+            if len(self.tasks) >= self.config.max_streams:
+                raise ConnectionError("forwarding task limit reached")
             self._spawn(self.control.handle(stream))
             return
         if metadata.get("kind") != "tcp":
             raise ValueError("unsupported stream kind")
         host, port = metadata.get("host"), metadata.get("port")
-        if not isinstance(host, str) or not isinstance(port, int) or not 1 <= port <= 65535:
+        if (not isinstance(host, str) or isinstance(port, bool)
+                or not isinstance(port, int) or not 1 <= port <= 65535):
             raise ValueError("invalid TCP destination")
         reader, writer = await self._connect_allowed(Endpoint(host, port))
+        if len(self.tasks) >= self.config.max_streams:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            raise ConnectionError("forwarding task limit reached")
         self._spawn(bridge_socket(reader, writer, stream))
 
     async def _on_listen(self, request_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -271,10 +321,20 @@ class AgentForwarder:
         endpoint = parse_endpoint(raw_listen)
         validate_reverse_listener(endpoint, self.config)
         server = await asyncio.start_server(
-            lambda r, w: self._spawn(self._handle_reverse(r, w, rule_id)), endpoint.host, endpoint.port,
+            lambda r, w: self._accept(self._handle_reverse(r, w, rule_id), w), endpoint.host, endpoint.port,
         )
-        self.listeners[rule_id] = _ReverseListener(rule_id, server)
+        listener = _ReverseListener(request_id, rule_id, server)
+        self.listeners[rule_id] = listener
+        self.listeners_by_request[request_id] = listener
         return {"rule_id": rule_id, "listen": str(endpoint)}
+
+    async def _cancel_listener(self, request_id: int) -> None:
+        listener = self.listeners_by_request.pop(request_id, None)
+        if listener is None:
+            return
+        self.listeners.pop(listener.rule_id, None)
+        listener.server.close()
+        await listener.server.wait_closed()
 
     async def _handle_reverse(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rule_id: str) -> None:
         try:
@@ -290,6 +350,8 @@ class AgentForwarder:
         for listener in self.listeners.values():
             listener.server.close()
         await asyncio.gather(*(x.server.wait_closed() for x in self.listeners.values()), return_exceptions=True)
+        self.listeners.clear()
+        self.listeners_by_request.clear()
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)

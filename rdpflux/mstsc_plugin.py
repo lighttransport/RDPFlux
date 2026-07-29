@@ -16,6 +16,7 @@ from .transport import CallbackTransport
 
 LOG = logging.getLogger(__name__)
 CHANNEL_NAME = b"com.rdpflux.v1"
+DVC_WRITE_CHUNK_LENGTH = 1590
 
 
 class _ConfigReloader:
@@ -39,14 +40,8 @@ class _ConfigReloader:
         return self._config
 
 
-MAX_RESTARTS = 5
-RESTART_BACKOFF = 1.0
-MAX_RESTART_BACKOFF = 10.0
-
-
 class _ChannelRuntime:
-    def __init__(self, channel, config: ClientConfig, *, max_restarts: int = MAX_RESTARTS,
-                 restart_backoff: float = RESTART_BACKOFF) -> None:
+    def __init__(self, channel, config: ClientConfig) -> None:
         self.channel = channel
         self.config = config
         self.transport = CallbackTransport(self._write)
@@ -54,9 +49,6 @@ class _ChannelRuntime:
         self.started = threading.Event()
         self.closed = threading.Event()
         self.stopping = threading.Event()
-        self.max_restarts = max_restarts
-        self.restart_backoff = restart_backoff
-        self.restarts = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.task: asyncio.Task[None] | None = None
         self.error: Exception | None = None
@@ -64,22 +56,27 @@ class _ChannelRuntime:
 
     def start(self) -> None:
         self.thread.start()
-        self.started.wait(5)
-        # Only failures from before the runtime signalled readiness abort the channel;
-        # anything later is handled by the restart loop in _thread_main.
+        if not self.started.wait(5):
+            self.close()
+            raise TimeoutError("mstsc channel runtime did not start within 5 seconds")
+        # Only failures from before the runtime signalled readiness can be
+        # returned synchronously to OnNewChannelConnection. Later failures close
+        # the accepted DVC so the agent can attach a fresh channel.
         if self.startup_error:
             raise self.startup_error
 
     def _write(self, data: bytes) -> None:
         if not data:
             return
-        # IWTSVirtualChannel.Write declares pBuffer as POINTER(Byte); a c_char
-        # buffer is not accepted by ctypes for an LP_c_ubyte parameter.
-        buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
-        hr = self.channel.Write(len(data), buffer, None)
-        code = int(getattr(hr, "value", hr))
-        if code != 0:
-            raise OSError(f"IWTSVirtualChannel.Write failed: 0x{code & 0xFFFFFFFF:08x}")
+        # The RDP stack limits IWTSVirtualChannel.Write to 1590 bytes per call.
+        # FrameDecoder reconstructs protocol frames across these DVC messages.
+        for offset in range(0, len(data), DVC_WRITE_CHUNK_LENGTH):
+            chunk = data[offset:offset + DVC_WRITE_CHUNK_LENGTH]
+            buffer = (ctypes.c_ubyte * len(chunk)).from_buffer_copy(chunk)
+            hr = self.channel.Write(len(chunk), buffer, None)
+            code = int(getattr(hr, "value", hr))
+            if code != 0:
+                raise OSError(f"IWTSVirtualChannel.Write failed: 0x{code & 0xFFFFFFFF:08x}")
 
     def feed(self, data: bytes) -> None:
         if self.closed.is_set():
@@ -107,50 +104,29 @@ class _ChannelRuntime:
 
     def _thread_main(self) -> None:
         try:
-            while not self.stopping.is_set():
-                try:
-                    asyncio.run(self._run())
-                except asyncio.CancelledError:
-                    return
-                except Exception as exc:
-                    self.error = exc
-                    LOG.exception("mstsc channel runtime failed")
-                    if not self.started.is_set():
-                        # Failed before the channel was accepted; let start() report it.
-                        self.startup_error = exc
-                        self.started.set()
-                        return
-                else:
-                    # The peer closed the tunnel cleanly; nothing to restart.
-                    return
-                if not self._wait_before_restart():
-                    return
+            try:
+                asyncio.run(self._run())
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self.error = exc
+                LOG.exception("mstsc channel runtime failed")
+                if not self.started.is_set():
+                    self.startup_error = exc
         finally:
             self.started.set()
             self.closed.set()
-
-    def _wait_before_restart(self) -> bool:
-        if self.stopping.is_set():
-            return False
-        if self.restarts >= self.max_restarts:
-            LOG.error("mstsc channel runtime gave up after %d restarts", self.restarts)
-            return False
-        delay = min(self.restart_backoff * (2 ** self.restarts), MAX_RESTART_BACKOFF)
-        self.restarts += 1
-        LOG.warning("restarting mstsc channel runtime in %.1fs (attempt %d/%d)",
-                    delay, self.restarts, self.max_restarts)
-        if self.stopping.wait(delay):
-            return False
-        # The previous transport is bound to a now-closed event loop.
-        self.transport = CallbackTransport(self._write)
-        self.loop = None
-        self.task = None
-        return True
+            if not self.stopping.is_set():
+                # A mux failure cannot be recovered by starting a second protocol
+                # session over the same DVC. Close it so the agent opens a fresh one.
+                try:
+                    self.channel.Close()
+                except Exception:
+                    LOG.debug("closing failed mstsc DVC raised", exc_info=True)
 
     async def _run(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.task = asyncio.current_task()
-        self.transport.attach_loop(self.loop)
         peer = MuxPeer(self.transport, role="client", max_streams=self.config.max_streams)
         forwarder = ClientForwarder(peer, self.config)
         self.started.set()
@@ -285,6 +261,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
                     self.runtime.feed(ctypes.string_at(data_ptr, size))
                 except Exception:
                     LOG.exception("feeding channel data failed")
+                    self._close_channel()
                     return hr_value(E_FAIL)
             return hr_value(S_OK)
 

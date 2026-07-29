@@ -6,7 +6,7 @@ import pytest
 
 from rdpflux.config import AgentConfig, ClientConfig, Endpoint, ForwardRule
 from rdpflux.forwarding import AgentForwarder, ClientForwarder, bridge_socket
-from rdpflux.mux import MuxPeer, MuxStream
+from rdpflux.mux import CHUNK_SIZE, INITIAL_WINDOW, MuxPeer, MuxStream
 from rdpflux.transport import MemoryTransport
 
 
@@ -79,14 +79,43 @@ async def test_late_open_result_does_not_close_mux():
 
 
 @pytest.mark.asyncio
+async def test_timed_out_listener_is_cancelled_without_closing_mux():
+    left, right = MemoryTransport.pair()
+    client = MuxPeer(left, role="client", keepalive_interval=0)
+    agent = MuxPeer(right, role="agent", keepalive_interval=0)
+    cancelled = asyncio.Event()
+
+    async def delayed_listen(_request_id, _metadata):
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.set()
+        return {}
+
+    async def accept(_stream, _metadata):
+        return None
+
+    client.set_handlers(on_open=accept)
+    agent.set_handlers(on_open=accept, on_listen=delayed_listen)
+    await asyncio.gather(client.start(), agent.start())
+    with pytest.raises(asyncio.TimeoutError):
+        await client.request_listener({"kind": "reverse"}, timeout=0.01)
+    await asyncio.wait_for(cancelled.wait(), 1)
+    assert not client.closed
+    assert not agent.closed
+    await asyncio.gather(client.close(), agent.close())
+
+
+@pytest.mark.asyncio
 async def test_close_tolerates_full_receive_queue():
     left, _right = MemoryTransport.pair()
     peer = MuxPeer(left, role="client")
     stream = MuxStream(peer, 1)
     peer.streams[1] = stream
-    for _ in range(stream._incoming.maxsize):
-        stream._incoming.put_nowait(b"x")
+    for _ in range(INITIAL_WINDOW // CHUNK_SIZE):
+        await stream._receive(b"x" * CHUNK_SIZE)
     await stream.close()
+    assert peer._incoming_buffered == 0
 
 
 @pytest.mark.asyncio
@@ -219,6 +248,7 @@ async def test_stale_frames_for_closed_streams_are_dropped():
     left, right = MemoryTransport.pair()
     peer = MuxPeer(left, role="client")
     peer._ready.set()
+    peer._next_stream_id = 101  # local odd ID 99 was allocated and is now stale
     for frame in (
         Frame(MessageType.DATA, 99, b"late"),
         Frame(MessageType.WINDOW_UPDATE, 99, encode_control({"credit": 10})),
@@ -226,3 +256,63 @@ async def test_stale_frames_for_closed_streams_are_dropped():
         Frame(MessageType.CLOSE, 99, encode_control({"reason": "gone"})),
     ):
         await peer._dispatch(frame)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_forged_frame_for_never_allocated_stream_is_rejected():
+    from rdpflux.protocol import Frame, MessageType, ProtocolError
+
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client")
+    peer._ready.set()
+    with pytest.raises(ProtocolError, match="unknown stream"):
+        await peer._dispatch(Frame(MessageType.DATA, 99, b"forged"))
+
+
+@pytest.mark.asyncio
+async def test_slow_open_handler_does_not_block_mux_dispatch():
+    from rdpflux.protocol import Frame, MessageType, encode_control
+
+    left, right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="agent", keepalive_interval=0)
+    peer._ready.set()
+    release = asyncio.Event()
+
+    async def slow_open(_stream, _metadata):
+        await release.wait()
+
+    peer.set_handlers(on_open=slow_open)
+    await peer._dispatch(Frame(MessageType.OPEN, 1, encode_control({"kind": "tcp"})))
+    await asyncio.wait_for(peer._dispatch(Frame(MessageType.PING, payload=b"ping")), 0.1)
+    assert await right.read()
+    release.set()
+    await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_receive_window_is_enforced():
+    from rdpflux.protocol import ProtocolError
+
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client")
+    stream = MuxStream(peer, 1)
+    peer.streams[1] = stream
+    await stream._receive(b"x" * INITIAL_WINDOW)
+    with pytest.raises(ProtocolError, match="receive window"):
+        await stream._receive(b"x")
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_graceful_close_preserves_buffered_data():
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="client")
+    stream = MuxStream(peer, 1)
+    peer.streams[1] = stream
+    await stream._receive(b"response")
+    await stream._receive_eof()
+    await stream._remote_close("done")
+    assert not stream.remote_reset
+    assert await stream.read() == b"response"
+    assert await stream.read() == b""
+    assert peer._incoming_buffered == 0

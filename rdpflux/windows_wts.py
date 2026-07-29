@@ -53,6 +53,7 @@ class ChunkReassembler:
     def __init__(self, max_message: int = MAX_SVC_MESSAGE) -> None:
         self._message = bytearray()
         self._max_message = max_message
+        self._declared_length: int | None = None
 
     @property
     def pending(self) -> int:
@@ -61,28 +62,41 @@ class ChunkReassembler:
 
     def feed(self, chunk: bytes) -> bytes | None:
         """Return the completed message, or None while more chunks are pending."""
-        if len(chunk) < CHANNEL_PDU_HEADER.size:
-            raise WTSError(f"channel chunk shorter than CHANNEL_PDU_HEADER: {len(chunk)} bytes")
-        length, flags = CHANNEL_PDU_HEADER.unpack_from(chunk)
-        if flags & CHANNEL_PACKET_COMPRESSED:
-            raise WTSError("compressed virtual channel data is not supported")
-        if length > self._max_message:
-            raise WTSError(f"channel message length {length} exceeds {self._max_message}")
-        if flags & CHANNEL_FLAG_FIRST:
-            self._message.clear()
-        self._message.extend(chunk[CHANNEL_PDU_HEADER.size:])
-        if len(self._message) > self._max_message:
-            self._message.clear()
-            raise WTSError("channel message exceeded the reassembly limit")
-        if not flags & CHANNEL_FLAG_LAST:
-            return None
-        if len(self._message) != length:
-            actual = len(self._message)
-            self._message.clear()
-            raise WTSError(f"channel message reassembled to {actual} bytes, header declared {length}")
-        message = bytes(self._message)
+        try:
+            if len(chunk) < CHANNEL_PDU_HEADER.size:
+                raise WTSError(f"channel chunk shorter than CHANNEL_PDU_HEADER: {len(chunk)} bytes")
+            length, flags = CHANNEL_PDU_HEADER.unpack_from(chunk)
+            if flags & CHANNEL_PACKET_COMPRESSED:
+                raise WTSError("compressed virtual channel data is not supported")
+            if length == 0:
+                raise WTSError("zero-length channel messages are invalid")
+            if length > self._max_message:
+                raise WTSError(f"channel message length {length} exceeds {self._max_message}")
+            if flags & CHANNEL_FLAG_FIRST:
+                self._message.clear()
+                self._declared_length = length
+            elif self._declared_length is None:
+                raise WTSError("channel continuation arrived without CHANNEL_FLAG_FIRST")
+            elif length != self._declared_length:
+                raise WTSError("channel message length changed during reassembly")
+            self._message.extend(chunk[CHANNEL_PDU_HEADER.size:])
+            if len(self._message) > length or len(self._message) > self._max_message:
+                raise WTSError("channel message exceeded its declared reassembly limit")
+            if not flags & CHANNEL_FLAG_LAST:
+                return None
+            if len(self._message) != length:
+                actual = len(self._message)
+                raise WTSError(f"channel message reassembled to {actual} bytes, header declared {length}")
+            message = bytes(self._message)
+            self._reset()
+            return message
+        except Exception:
+            self._reset()
+            raise
+
+    def _reset(self) -> None:
         self._message.clear()
-        return message
+        self._declared_length = None
 
 
 class WTSChannelTransport(AsyncTransport):
@@ -135,36 +149,42 @@ class WTSChannelTransport(AsyncTransport):
             raise WTSError(error, f"cannot open RDP channel {channel_name}")
         return cls(handle, channel_name, dynamic=dynamic)
 
-    def _blocking_read(self) -> bytes:
-        while not self._closed:
-            buffer = self._read_buffer
-            received = wintypes.ULONG()
-            with self._io_lock:
-                ok = self._wts.WTSVirtualChannelRead(
-                    self.handle, READ_TIMEOUT_MS, buffer, len(buffer), ctypes.byref(received),
-                )
-                error = 0 if ok else ctypes.get_last_error()
-            if ok:
-                if received.value:
-                    data = buffer.raw[:received.value]
-                    LOG.debug("channel read %d bytes: %s", len(data), data[:32].hex(" "))
-                    message = self._reassembler.feed(data)
-                    if message is None:
-                        # Mid-message; wait for the remaining chunks. A message that
-                        # never completes stalls this loop, which starves the mux
-                        # keepalive, so make the pending state visible.
-                        LOG.debug("chunk incomplete; %d bytes pending reassembly",
-                                  self._reassembler.pending)
-                        continue
-                    return message
-                continue
-            if error in BENIGN_READ_ERRORS:
-                continue
-            raise WTSError(error, f"read from RDP channel {self.channel_name} failed")
-        return b""
+    def _blocking_read_once(self) -> bytes | None:
+        if self._closed:
+            return b""
+        buffer = self._read_buffer
+        received = wintypes.ULONG()
+        with self._io_lock:
+            if self._closed:
+                return b""
+            ok = self._wts.WTSVirtualChannelRead(
+                self.handle, READ_TIMEOUT_MS, buffer, len(buffer), ctypes.byref(received),
+            )
+            error = 0 if ok else ctypes.get_last_error()
+        if ok:
+            if received.value:
+                if received.value > len(buffer):
+                    raise WTSError("RDP channel returned more bytes than the read buffer")
+                data = buffer.raw[:received.value]
+                LOG.debug("channel read %d bytes: %s", len(data), data[:32].hex(" "))
+                message = self._reassembler.feed(data)
+                if message is None:
+                    LOG.debug("chunk incomplete; %d bytes pending reassembly",
+                              self._reassembler.pending)
+                return message
+            return None
+        if error in BENIGN_READ_ERRORS:
+            return None
+        raise WTSError(error, f"read from RDP channel {self.channel_name} failed")
 
     async def read(self) -> bytes:
-        return await asyncio.to_thread(self._blocking_read)
+        while not self._closed:
+            message = await asyncio.to_thread(self._blocking_read_once)
+            if message is not None:
+                return message
+            # Yield between polls so a waiting writer can acquire the handle lock.
+            await asyncio.sleep(0.01)
+        return b""
 
     def _write_all(self, data: bytes) -> None:
         if len(data) > CHANNEL_CHUNK_LENGTH:
@@ -173,6 +193,8 @@ class WTSChannelTransport(AsyncTransport):
         buffer[:len(data)] = data
         written = wintypes.ULONG()
         with self._io_lock:
+            if self._closed:
+                raise WTSError("RDP channel is closed")
             ok = self._wts.WTSVirtualChannelWrite(self.handle, buffer, len(data), ctypes.byref(written))
             error = 0 if ok else ctypes.get_last_error()
         if not ok:
@@ -189,14 +211,23 @@ class WTSChannelTransport(AsyncTransport):
             self._write_all(data[offset:offset + CHANNEL_CHUNK_LENGTH])
 
     async def write(self, data: bytes) -> None:
+        if self._closed:
+            raise WTSError("RDP channel is closed")
         async with self._write_lock:
+            if self._closed:
+                raise WTSError("RDP channel is closed")
             await asyncio.to_thread(self._blocking_write, data)
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        await asyncio.to_thread(self._wts.WTSVirtualChannelClose, self.handle)
+
+        def close_handle() -> None:
+            with self._io_lock:
+                self._wts.WTSVirtualChannelClose(self.handle)
+
+        await asyncio.to_thread(close_handle)
 
 
 def open_agent_transport(mode: str) -> WTSChannelTransport:

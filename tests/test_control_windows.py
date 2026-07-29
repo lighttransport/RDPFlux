@@ -2,7 +2,10 @@ import os
 
 import pytest
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="desktop control is Windows-only")
+pytestmark = pytest.mark.skipif(
+    os.name != "nt" or os.environ.get("RDPFLUX_RUN_DESKTOP_TESTS") != "1",
+    reason="requires an interactive Windows desktop; set RDPFLUX_RUN_DESKTOP_TESTS=1",
+)
 
 from rdpflux.control import capture, inject  # noqa: E402
 from rdpflux.control.actions import ActionError  # noqa: E402

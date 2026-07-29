@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import io
+import queue
 import struct
 import sys
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+
+MAX_FREERDP_MESSAGE = 1024 * 1024
+MAX_CALLBACK_MESSAGE = 1024 * 1024
+MAX_CALLBACK_BUFFER = 4 * 1024 * 1024
+MAX_CALLBACK_MESSAGES = 4096
 
 
 class AsyncTransport(ABC):
@@ -80,6 +86,7 @@ class FreeRDPStdioTransport(AsyncTransport):
     """
 
     def __init__(self, stdin: io.BufferedReader | None = None, stdout: io.BufferedWriter | None = None) -> None:
+        self._owns_stdio = stdin is None and stdout is None
         self.stdin = stdin or sys.stdin.buffer
         self.stdout = stdout or sys.stdout.buffer
         self._closed = False
@@ -96,20 +103,34 @@ class FreeRDPStdioTransport(AsyncTransport):
         return bytes(chunks)
 
     def _blocking_read(self) -> bytes:
-        try:
-            header = self._read_exact(self.stdin, 4)
-            (length,) = struct.unpack("<I", header)
-            if length > 1024 * 1024:
-                raise ValueError(f"invalid FreeRDP message length {length}")
-            return self._read_exact(self.stdin, length)
-        except EOFError:
+        if self._closed:
             return b""
+        first = self.stdin.read(4)
+        if not first:
+            return b""
+        try:
+            header = first + self._read_exact(self.stdin, 4 - len(first)) if len(first) < 4 else first
+        except EOFError as exc:
+            raise ValueError("truncated FreeRDP message header") from exc
+        (length,) = struct.unpack("<I", header)
+        if length == 0 or length > MAX_FREERDP_MESSAGE:
+            raise ValueError(f"invalid FreeRDP message length {length}")
+        try:
+            return self._read_exact(self.stdin, length)
+        except EOFError as exc:
+            raise ValueError(f"truncated FreeRDP message body (expected {length} bytes)") from exc
 
     async def read(self) -> bytes:
         return await asyncio.to_thread(self._blocking_read)
 
     async def write(self, data: bytes) -> None:
+        if self._closed:
+            raise ConnectionError("transport is closed")
+        if not data:
+            return
         async with self._write_lock:
+            if self._closed:
+                raise ConnectionError("transport is closed")
             await asyncio.to_thread(self._blocking_write, data)
 
     def _blocking_write(self, data: bytes) -> None:
@@ -117,7 +138,15 @@ class FreeRDPStdioTransport(AsyncTransport):
         self.stdout.flush()
 
     async def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        if self._owns_stdio:
+            for stream in (self.stdin, self.stdout):
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
 
 
 class CallbackTransport(AsyncTransport):
@@ -125,39 +154,63 @@ class CallbackTransport(AsyncTransport):
 
     def __init__(self, write_callback: Callable[[bytes], None]) -> None:
         self._write_callback = write_callback
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._incoming: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._incoming: queue.Queue[bytes | None] = queue.Queue(maxsize=MAX_CALLBACK_MESSAGES)
+        self._state_lock = threading.Lock()
+        self._queued_bytes = 0
         self._closed = False
         self._write_lock = asyncio.Lock()
 
-    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._loop = loop
-
-    def _submit_from_thread(self, value: bytes | None) -> None:
-        loop = self._loop
-        if loop is None or self._closed or loop.is_closed():
-            return
-        try:
-            loop.call_soon_threadsafe(self._incoming.put_nowait, value)
-        except RuntimeError:
-            # The loop was closed between the check above and the call.
-            pass
-
-    def feed_from_thread(self, data: bytes) -> None:
-        self._submit_from_thread(bytes(data))
+    def feed_from_thread(self, data: bytes) -> bool:
+        value = bytes(data)
+        if not value:
+            return True
+        if len(value) > MAX_CALLBACK_MESSAGE:
+            raise BufferError(f"DVC callback of {len(value)} bytes exceeds the message limit")
+        with self._state_lock:
+            if self._closed:
+                return False
+            if self._queued_bytes + len(value) > MAX_CALLBACK_BUFFER or self._incoming.full():
+                raise BufferError("DVC callback buffer limit exceeded")
+            self._incoming.put_nowait(value)
+            self._queued_bytes += len(value)
+        return True
 
     def eof_from_thread(self) -> None:
-        self._submit_from_thread(None)
+        self._close_from_thread()
 
     async def read(self) -> bytes:
-        value = await self._incoming.get()
+        value = await asyncio.to_thread(self._incoming.get)
+        with self._state_lock:
+            if value is not None:
+                self._queued_bytes = max(0, self._queued_bytes - len(value))
+            closed = self._closed
+        if closed:
+            return b""
         return b"" if value is None else value
 
     async def write(self, data: bytes) -> None:
+        if self._closed:
+            raise ConnectionError("transport is closed")
+        if not data:
+            return
         async with self._write_lock:
+            if self._closed:
+                raise ConnectionError("transport is closed")
             await asyncio.to_thread(self._write_callback, data)
 
     async def close(self) -> None:
-        self._closed = True
-        await self._incoming.put(None)
+        self._close_from_thread()
 
+    def _close_from_thread(self) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            while True:
+                try:
+                    value = self._incoming.get_nowait()
+                except queue.Empty:
+                    break
+                if value is not None:
+                    self._queued_bytes = max(0, self._queued_bytes - len(value))
+            self._incoming.put_nowait(None)
