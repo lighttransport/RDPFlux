@@ -178,6 +178,68 @@ Start the agent with `--enable-reverse`. A non-loopback remote listener also
 requires `--allow-nonloopback-reverse` and should only be used on a trusted
 network with appropriate firewall rules.
 
+## Desktop control for LLM/VLM agents
+
+RDPFlux can expose the remote desktop to a vision-language model: screenshots
+in, mouse and keyboard out, over the same RDP channel. **No new port is opened on
+the remote machine.** The agent captures and injects locally; the client machine
+runs a loopback REST API and, optionally, an MCP server that a model drives.
+
+Enable it on the agent (opt-in, like reverse forwarding):
+
+```powershell
+python -m rdpflux.agent --enable-control
+```
+
+The client exposes a loopback REST API and OpenAPI spec. Add a `control` block to
+`client.json`:
+
+```json
+{
+  "control": { "listen": "127.0.0.1:18080", "token": "a-long-random-string" }
+}
+```
+
+Then, from the client machine:
+
+```text
+curl -H "Authorization: Bearer a-long-random-string" \
+     -X POST http://127.0.0.1:18080/v1/screenshot \
+     -d '{"width":1280,"format":"jpeg"}' -o shot.jpg
+
+curl -H "Authorization: Bearer a-long-random-string" \
+     -X POST http://127.0.0.1:18080/v1/action \
+     -d '{"action":"left_click","coordinate":[640,360]}'
+```
+
+`GET /openapi.json` serves the full schema for OpenAI-style function calling. The
+action vocabulary mirrors Anthropic's computer-use tool (`screenshot`,
+`left_click`, `type`, `key`, `scroll`, `left_click_drag`, …). Coordinates are in
+the delivered screenshot's pixel space; the agent scales them to the native
+display, so the model never handles two coordinate systems.
+
+For Claude Desktop or Claude Code, run an MCP server that bridges to the REST API:
+
+```text
+python -m rdpflux.client mcp --url http://127.0.0.1:18080 --token a-long-random-string
+```
+
+Install `rdpflux[control]` on the agent for smaller JPEG frames; without Pillow it
+falls back to PNG.
+
+### Control security model
+
+- Screen capture and input are off unless `--enable-control` is set.
+- **Shell execution** (`--enable-exec`) and **file transfer** (`--enable-file-transfer
+  --file-root DIR`) are separate flags, because they turn desktop control into
+  arbitrary remote code execution. File transfer is confined to `--file-root`;
+  paths that escape it (including `..` and symlinks) are rejected.
+- The client REST listener binds loopback and requires a bearer token — any local
+  process can otherwise reach a loopback port.
+- Windows limits apply: input from a non-elevated agent cannot drive elevated
+  windows or the UAC secure desktop, and capture returns black if the RDP session
+  is disconnected, so mstsc must stay connected.
+
 ## Standalone builds
 
 On Windows:

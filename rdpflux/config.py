@@ -59,6 +59,10 @@ class ClientConfig:
     local_forwards: list[ForwardRule] = field(default_factory=list)
     socks: list[Endpoint] = field(default_factory=list)
     reverse_forwards: list[ForwardRule] = field(default_factory=list)
+    # When set, expose the remote desktop-control service as a loopback REST API.
+    # The token guards it, since any local process can reach a loopback listener.
+    control_listen: Endpoint | None = None
+    control_token: str = ""
     max_streams: int = 128
     connect_timeout: float = 15.0
     idle_timeout: float = 0.0
@@ -86,6 +90,13 @@ class AgentConfig:
     ])
     enable_reverse: bool = False
     allow_nonloopback_reverse: bool = False
+    # Desktop control is opt-in like reverse forwarding. Shell execution and file
+    # transfer are separate flags because they turn desktop control into arbitrary
+    # remote code execution, so they should not ride along with screenshots.
+    enable_control: bool = False
+    enable_exec: bool = False
+    enable_file_transfer: bool = False
+    file_root: str = ""
     max_streams: int = 128
     connect_timeout: float = 15.0
 
@@ -114,6 +125,12 @@ def load_client_config(path: str | Path | None) -> ClientConfig:
     cfg.local_forwards = [_rule(v, "local_forwards") for v in raw.get("local_forwards", [])]
     cfg.reverse_forwards = [_rule(v, "reverse_forwards") for v in raw.get("reverse_forwards", [])]
     cfg.socks = [parse_endpoint(v if isinstance(v, str) else v.get("listen", "")) for v in raw.get("socks", [])]
+    control = raw.get("control")
+    if isinstance(control, dict):
+        listen = control.get("listen")
+        if isinstance(listen, str) and listen:
+            cfg.control_listen = parse_endpoint(listen, default_host="127.0.0.1")
+        cfg.control_token = str(control.get("token", ""))
     limits = raw.get("limits", {})
     if not isinstance(limits, dict):
         raise ConfigError("limits must be an object")
@@ -160,6 +177,10 @@ def load_agent_config(path: str | Path | None) -> AgentConfig:
         cfg.allow_targets = [parse_allowed_target(str(v)) for v in raw["allow_targets"]]
     cfg.enable_reverse = bool(raw.get("enable_reverse", cfg.enable_reverse))
     cfg.allow_nonloopback_reverse = bool(raw.get("allow_nonloopback_reverse", cfg.allow_nonloopback_reverse))
+    cfg.enable_control = bool(raw.get("enable_control", cfg.enable_control))
+    cfg.enable_exec = bool(raw.get("enable_exec", cfg.enable_exec))
+    cfg.enable_file_transfer = bool(raw.get("enable_file_transfer", cfg.enable_file_transfer))
+    cfg.file_root = str(raw.get("file_root", cfg.file_root))
     cfg.max_streams = int(raw.get("max_streams", cfg.max_streams))
     cfg.connect_timeout = float(raw.get("connect_timeout", cfg.connect_timeout))
     return cfg

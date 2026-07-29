@@ -83,6 +83,7 @@ class ClientForwarder:
         self.servers: list[asyncio.AbstractServer] = []
         self.tasks: set[asyncio.Task[Any]] = set()
         self.reverse_rules: dict[str, ForwardRule] = {}
+        self.control_http: Any = None
         self.peer.set_handlers(on_open=self._on_open)
 
     def _spawn(self, coroutine: Any) -> None:
@@ -113,6 +114,19 @@ class ClientForwarder:
             self.reverse_rules[rule_id] = rule
             await self.peer.request_listener({"kind": "reverse", "rule_id": rule_id, "listen": str(rule.listen)})
             LOG.info("reverse forward %s -> client %s", rule.listen, rule.target)
+        if self.config.control_listen is not None:
+            await self._start_control()
+
+    async def _start_control(self) -> None:
+        from .control.client import ControlClient
+        from .control.http import ControlHTTPServer
+
+        listen = self.config.control_listen
+        server = ControlHTTPServer(ControlClient(self.peer), token=self.config.control_token)
+        self.control_http = server
+        self.servers.append(await server.start(listen.host, listen.port))
+        LOG.info("desktop control REST API on %s (token %s)", listen,
+                 "required" if self.config.control_token else "DISABLED")
 
     async def _handle_local(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rule: ForwardRule) -> None:
         try:
@@ -202,9 +216,10 @@ class _ReverseListener:
 
 
 class AgentForwarder:
-    def __init__(self, peer: MuxPeer, config: AgentConfig) -> None:
+    def __init__(self, peer: MuxPeer, config: AgentConfig, control: Any = None) -> None:
         self.peer = peer
         self.config = config
+        self.control = control
         self.listeners: dict[str, _ReverseListener] = {}
         self.tasks: set[asyncio.Task[Any]] = set()
         self.peer.set_handlers(on_open=self._on_open, on_listen=self._on_listen)
@@ -231,6 +246,11 @@ class AgentForwarder:
         raise ConnectionError(f"cannot connect to {target}: {last_error}")
 
     async def _on_open(self, stream: MuxStream, metadata: dict[str, Any]) -> None:
+        if metadata.get("kind") == "control":
+            if not self.config.enable_control or self.control is None:
+                raise ValueError("desktop control is disabled")
+            self._spawn(self.control.handle(stream))
+            return
         if metadata.get("kind") != "tcp":
             raise ValueError("unsupported stream kind")
         host, port = metadata.get("host"), metadata.get("port")

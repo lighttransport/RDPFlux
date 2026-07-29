@@ -47,6 +47,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--log-file", help="write logs here; defaults to the mstsc plugin log when run by COM")
     run.add_argument("--no-log-file", action="store_true", help="disable the default mstsc plugin log file")
     run.add_argument("--com-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    run.add_argument("--control-listen", help="expose the desktop-control REST API on this loopback endpoint")
+    run.add_argument("--control-token", help="bearer token guarding the control API")
+    mcp = sub.add_parser("mcp", help="serve MCP over stdio, bridging to a running control REST API")
+    mcp.add_argument("--url", default="http://127.0.0.1:18080",
+                     help="base URL of the client's control REST API")
+    mcp.add_argument("--token", default="", help="bearer token for the control API")
+    mcp.add_argument("--enable-exec", action="store_true", help="expose the run_command tool")
+    mcp.add_argument("--enable-file-transfer", action="store_true", help="expose the file tools")
     return parser
 
 
@@ -85,7 +93,27 @@ def _config(args) -> ClientConfig:
     cfg.reverse_forwards.extend(args.reverse)
     for value in args.socks:
         cfg.socks.append(parse_endpoint(value, default_host="127.0.0.1"))
+    if getattr(args, "control_listen", None):
+        cfg.control_listen = parse_endpoint(args.control_listen, default_host="127.0.0.1")
+    if getattr(args, "control_token", None):
+        cfg.control_token = args.control_token
     return cfg
+
+
+def _run_mcp(args) -> int:
+    from .control.http_client import HTTPControlClient
+    from .control.mcp import MCPServer
+
+    server = MCPServer(
+        HTTPControlClient(args.url, args.token),
+        exec_enabled=args.enable_exec,
+        files_enabled=args.enable_file_transfer,
+    )
+    try:
+        asyncio.run(server.serve_stdio())
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 async def _run_freerdp(config: ClientConfig) -> None:
@@ -114,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         unregister(machine=args.machine)
         print("mstsc plugin unregistered")
         return 0
+    if args.command == "mcp":
+        return _run_mcp(args)
     if args.command != "run":
         _parser().print_help()
         return 2

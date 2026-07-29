@@ -23,6 +23,7 @@ Issues = "https://github.com/lighttransport/RDPFlux/issues"
 
 [project.optional-dependencies]
 mstsc = ["win32more>=0.6.9"]
+control = ["pillow>=10.0"]
 build = ["pyinstaller>=6.0"]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 

@@ -12,6 +12,10 @@
     }
   ],
   "reverse_forwards": [],
+  "control": {
+    "listen": "127.0.0.1:18080",
+    "token": "change-me-to-a-long-random-string"
+  },
   "limits": {
     "max_streams": 128,
     "connect_timeout": 15,
