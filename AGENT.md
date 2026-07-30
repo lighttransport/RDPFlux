@@ -17,6 +17,10 @@ The hook executes:
 - `${HOME}/local/bin/trufflehog filesystem --fail --no-update .`
 
 CI also runs the same audit via `.github/workflows/secret-scan.yml`.
+The CI workflow currently pins:
+
+- `gitleaks` at `v8.16.0`
+- `trufflehog` at `v3.95.6`
 
 Environment overrides:
 
