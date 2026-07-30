@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${SKIP_SECRET_AUDIT:-0}" == "1" ]]; then
+  echo "[pre-push] SKIP_SECRET_AUDIT=1 set; skipping secret audit."
+  exit 0
+fi
+
+if ! repo_root=$(git rev-parse --show-toplevel); then
+  echo "[pre-push] Not running inside a git repository." >&2
+  exit 1
+fi
+cd "$repo_root"
+
+GITLEAKS_BIN="${GITLEAKS_BIN:-gitleaks}"
+TRUFFLEHOG_BIN="${TRUFFLEHOG_BIN:-${HOME}/local/bin/trufflehog}"
+
+if ! command -v "$GITLEAKS_BIN" >/dev/null 2>&1; then
+  echo "[pre-push] gitleaks not found: ${GITLEAKS_BIN}" >&2
+  echo "[pre-push] Install gitleaks and set GITLEAKS_BIN to its location." >&2
+  exit 1
+fi
+
+if [ ! -x "$TRUFFLEHOG_BIN" ]; then
+  echo "[pre-push] trufflehog not executable: ${TRUFFLEHOG_BIN}" >&2
+  echo "[pre-push] Install trufflehog at ${HOME}/local/bin/trufflehog or set TRUFFLEHOG_BIN." >&2
+  exit 1
+fi
+
+echo "[pre-push] Running gitleaks..."
+if ! "$GITLEAKS_BIN" detect --source . --no-git --no-banner --redact --log-level error; then
+  echo "[pre-push] gitleaks detected issues. Push blocked." >&2
+  exit 1
+fi
+
+echo "[pre-push] Running trufflehog..."
+if ! "$TRUFFLEHOG_BIN" filesystem --fail --no-update --no-verification --directory .; then
+  echo "[pre-push] trufflehog detected issues. Push blocked." >&2
+  exit 1
+fi
+
+echo "[pre-push] Secret audit passed."
