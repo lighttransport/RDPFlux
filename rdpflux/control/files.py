@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import PureWindowsPath
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,9 @@ class FileStore:
         """
         if not isinstance(path, str) or not path:
             raise ActionError("path must be a non-empty string")
+        windows_path = PureWindowsPath(path)
+        if Path(path).is_absolute() or windows_path.drive or windows_path.root:
+            raise ActionError(f"path escapes the file root: {path}")
         candidate = (self.root / path).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             raise ActionError(f"path escapes the file root: {path}")
