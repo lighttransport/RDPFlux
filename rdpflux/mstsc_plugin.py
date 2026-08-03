@@ -241,11 +241,17 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
                          len(channel_config.local_forwards), len(channel_config.socks),
                          len(channel_config.reverse_forwards))
                 self.runtime = _ChannelRuntime(channel, channel_config)
-                self.runtime.start()
+                # The channel is not writable until mstsc has accepted this
+                # callback.  Publish acceptance before starting the runtime;
+                # otherwise its initial HELLO can be dropped, while a later
+                # HELLO_ACK succeeds and leaves the peer half-handshaken.
                 accept[0] = True
                 callback[0] = self
+                self.runtime.start()
                 return hr_value(S_OK)
             except Exception:
+                accept[0] = False
+                callback[0] = None
                 LOG.exception("opening the mstsc channel failed")
                 self._close_channel()
                 return hr_value(E_FAIL)
