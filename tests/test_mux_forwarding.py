@@ -142,6 +142,27 @@ async def test_retransmitted_hello_is_re_acked():
 
 
 @pytest.mark.asyncio
+async def test_changed_retransmitted_hello_is_rejected():
+    from rdpflux.protocol import Frame, MessageType, encode_control, ProtocolError
+
+    left, _right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="agent", keepalive_interval=0, handshake_retransmit=0)
+    hello = {"role": "client", "version": 1, "nonce": "a", "window": INITIAL_WINDOW}
+    await peer._dispatch(Frame(MessageType.HELLO, payload=encode_control(hello)))
+    hello["nonce"] = "b"
+    with pytest.raises(ProtocolError, match="changed"):
+        await peer._dispatch(Frame(MessageType.HELLO, payload=encode_control(hello)))
+    await peer.close()
+
+
+def test_handshake_retransmit_rejects_invalid_values():
+    left, _right = MemoryTransport.pair()
+    for value in (-1, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError):
+            MuxPeer(left, role="client", handshake_retransmit=value)
+
+
+@pytest.mark.asyncio
 async def test_late_open_result_does_not_close_mux():
     left, right = MemoryTransport.pair()
     client = MuxPeer(left, role="client", keepalive_interval=0)

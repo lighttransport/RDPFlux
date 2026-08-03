@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -236,6 +237,11 @@ class MuxPeer:
             raise ValueError("role must be client or agent")
         if max_streams < 1:
             raise ValueError("max_streams must be positive")
+        if (isinstance(handshake_retransmit, bool)
+                or not isinstance(handshake_retransmit, (int, float))
+                or not math.isfinite(handshake_retransmit)
+                or handshake_retransmit < 0):
+            raise ValueError("handshake_retransmit must be a finite non-negative number")
         self.transport = transport
         self.role = role
         self.max_streams = max_streams
@@ -253,6 +259,7 @@ class MuxPeer:
         self._heartbeat: asyncio.Task[None] | None = None
         self._handshake: asyncio.Task[None] | None = None
         self._hello_payload: bytes | None = None
+        self._peer_hello: tuple[str, int, str, int] | None = None
         self._last_received = time.monotonic()
         self._pending_opens: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._pending_listens: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -473,6 +480,13 @@ class MuxPeer:
             window = hello.get("window")
             if isinstance(window, bool) or not isinstance(window, int) or window != INITIAL_WINDOW:
                 raise ProtocolError("unsupported peer stream window")
+            nonce = hello.get("nonce")
+            if not isinstance(nonce, str) or not nonce or len(nonce) > 128:
+                raise ProtocolError("invalid peer hello nonce")
+            identity = (role, hello["version"], nonce, window)
+            if self._peer_hello is not None and identity != self._peer_hello:
+                raise ProtocolError("peer HELLO changed during handshake")
+            self._peer_hello = identity
             self._hello_received = True
             # Re-ACK every HELLO, not just the first: a retransmitted HELLO means
             # the peer has not seen our HELLO_ACK (mstsc can drop a channel's

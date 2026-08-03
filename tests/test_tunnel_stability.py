@@ -43,10 +43,10 @@ pytestmark = pytest.mark.skipif(
 def _fetch(url: str) -> tuple[int, str, float]:
     """Return (body length, sha256, elapsed) or raise so the caller records a failure."""
     start = time.time()
-    response = urllib.request.urlopen(url, timeout=TIMEOUT)
-    body = response.read()
-    if response.status != 200:
-        raise AssertionError(f"unexpected HTTP status {response.status}")
+    with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+        body = response.read()
+        if response.status != 200:
+            raise AssertionError(f"unexpected HTTP status {response.status}")
     return len(body), hashlib.sha256(body).hexdigest(), time.time() - start
 
 
