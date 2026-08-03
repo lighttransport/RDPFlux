@@ -242,12 +242,12 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
                          len(channel_config.reverse_forwards))
                 self.runtime = _ChannelRuntime(channel, channel_config)
                 # The channel is not writable until mstsc has accepted this
-                # callback.  Publish acceptance before starting the runtime;
-                # otherwise its initial HELLO can be dropped, while a later
-                # HELLO_ACK succeeds and leaves the peer half-handshaken.
+                # callback returns.  Publish acceptance now, and defer runtime
+                # startup until the first inbound callback below; otherwise
+                # the initial HELLO can be dropped, while a later HELLO_ACK
+                # succeeds and leaves the peer half-handshaken.
                 accept[0] = True
                 callback[0] = self
-                self.runtime.start()
                 return hr_value(S_OK)
             except Exception:
                 accept[0] = False
@@ -264,6 +264,8 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
                 return hr_value(E_FAIL)
             if size > 0 and data_ptr and self.runtime:
                 try:
+                    if not self.runtime.started.is_set():
+                        self.runtime.start()
                     self.runtime.feed(ctypes.string_at(data_ptr, size))
                 except Exception:
                     LOG.exception("feeding channel data failed")
