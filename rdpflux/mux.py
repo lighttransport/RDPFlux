@@ -403,6 +403,11 @@ class MuxPeer:
 
     async def _heartbeat_loop(self) -> None:
         try:
+            # Keepalives are ordinary protocol frames and are not valid until
+            # both HELLO messages have completed the handshake.  Waiting here
+            # also avoids a race with the 15-second handshake timeout: a slow
+            # virtual channel must not receive PING before it is ready.
+            await self._ready.wait()
             while not self._closed.is_set():
                 await asyncio.sleep(self.keepalive_interval)
                 idle = time.monotonic() - self._last_received
