@@ -7,7 +7,48 @@ import pytest
 from rdpflux.config import AgentConfig, ClientConfig, Endpoint, ForwardRule
 from rdpflux.forwarding import AgentForwarder, ClientForwarder, bridge_socket
 from rdpflux.mux import CHUNK_SIZE, INITIAL_WINDOW, MAX_BUFFERED_DATA, MuxPeer, MuxStream
-from rdpflux.transport import MemoryTransport
+from rdpflux.transport import AsyncTransport, MemoryTransport
+
+
+class LossyTransport(AsyncTransport):
+    """Full-duplex in-memory transport that can drop selected writes.
+
+    mstsc silently drops a dynamic virtual channel's first write, so this models
+    a peer whose opening frames vanish on the wire.
+    """
+
+    def __init__(self, drop_writes: tuple[int, ...] = ()) -> None:
+        self._incoming: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self.peer: "LossyTransport | None" = None
+        self.closed = False
+        self._writes = 0
+        self._drop = set(drop_writes)
+
+    @classmethod
+    def pair(cls, drop_left: tuple[int, ...] = (), drop_right: tuple[int, ...] = ()):
+        left, right = cls(drop_left), cls(drop_right)
+        left.peer, right.peer = right, left
+        return left, right
+
+    async def read(self) -> bytes:
+        value = await self._incoming.get()
+        return b"" if value is None else value
+
+    async def write(self, data: bytes) -> None:
+        if self.closed or self.peer is None or self.peer.closed:
+            raise ConnectionError("transport is closed")
+        self._writes += 1
+        if self._writes in self._drop:
+            return  # the RDP stack accepted the write but dropped it on the wire
+        await self.peer._incoming.put(bytes(data))
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        await self._incoming.put(None)
+        if self.peer is not None:
+            await self.peer._incoming.put(None)
 
 
 async def start_echo_server():
@@ -56,6 +97,48 @@ async def test_local_forward_large_payload():
     await agent.close()
     echo.close()
     await echo.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handshake_survives_dropped_first_write():
+    """mstsc drops the client's first channel write, losing its opening HELLO.
+
+    The HELLO_ACK (a later write) still lands, so without retransmission both
+    peers stay half-handshaken and time out. Retransmitting HELLO must recover.
+    """
+    left, right = LossyTransport.pair(drop_left=(1,))
+    client = MuxPeer(left, role="client", keepalive_interval=0, handshake_retransmit=0.05)
+    agent = MuxPeer(right, role="agent", keepalive_interval=0, handshake_retransmit=0.05)
+
+    async def accept(_stream, _metadata):
+        return None
+
+    client.set_handlers(on_open=accept)
+    agent.set_handlers(on_open=accept)
+    await asyncio.gather(client.start(), agent.start())
+    await asyncio.wait_for(asyncio.gather(client.wait_ready(), agent.wait_ready()), 2)
+    assert client._ready.is_set() and agent._ready.is_set()
+
+    stream = await client.open_stream({"kind": "tcp", "host": "127.0.0.1", "port": 1})
+    assert stream.stream_id == 1
+    await asyncio.gather(client.close(), agent.close())
+
+
+@pytest.mark.asyncio
+async def test_retransmitted_hello_is_re_acked():
+    from rdpflux.protocol import Frame, FrameDecoder, MessageType, encode_control
+
+    left, right = MemoryTransport.pair()
+    peer = MuxPeer(left, role="agent", keepalive_interval=0, handshake_retransmit=0)
+    hello = encode_control({"role": "client", "version": 1, "nonce": "a", "window": INITIAL_WINDOW})
+    await peer._dispatch(Frame(MessageType.HELLO, payload=hello))
+    # A retransmitted HELLO must be re-ACKed, not rejected as a duplicate: the peer
+    # only resends because it never saw the first ACK.
+    await peer._dispatch(Frame(MessageType.HELLO, payload=hello))
+    decoder = FrameDecoder()
+    acks = decoder.feed(await right.read()) + decoder.feed(await right.read())
+    assert [frame.kind for frame in acks] == [MessageType.HELLO_ACK, MessageType.HELLO_ACK]
+    await peer.close()
 
 
 @pytest.mark.asyncio

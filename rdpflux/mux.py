@@ -230,7 +230,8 @@ class MuxStream:
 
 class MuxPeer:
     def __init__(self, transport: AsyncTransport, *, role: str, max_streams: int = 128,
-                 keepalive_interval: float = 15.0, keepalive_timeout: float = 45.0) -> None:
+                 keepalive_interval: float = 15.0, keepalive_timeout: float = 45.0,
+                 handshake_retransmit: float = 1.0) -> None:
         if role not in {"client", "agent"}:
             raise ValueError("role must be client or agent")
         if max_streams < 1:
@@ -240,6 +241,7 @@ class MuxPeer:
         self.max_streams = max_streams
         self.keepalive_interval = keepalive_interval
         self.keepalive_timeout = keepalive_timeout
+        self.handshake_retransmit = handshake_retransmit
         self.streams: dict[int, MuxStream] = {}
         self._next_stream_id = 1 if role == "client" else 2
         self._highest_peer_id = 0
@@ -249,6 +251,8 @@ class MuxPeer:
         self._closed = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
         self._heartbeat: asyncio.Task[None] | None = None
+        self._handshake: asyncio.Task[None] | None = None
+        self._hello_payload: bytes | None = None
         self._last_received = time.monotonic()
         self._pending_opens: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._pending_listens: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -279,12 +283,39 @@ class MuxPeer:
     async def start(self) -> None:
         if self._runner is not None:
             return
+        # Reuse one HELLO payload for every (re)transmission so a retransmit is
+        # byte-identical to the original and the peer can treat it idempotently.
+        self._hello_payload = encode_control({
+            "role": self.role, "version": 1, "nonce": secrets.token_hex(16), "window": INITIAL_WINDOW,
+        })
         self._runner = asyncio.create_task(self._run(), name=f"mux-{self.role}")
         if self.keepalive_interval > 0:
             self._heartbeat = asyncio.create_task(self._heartbeat_loop(), name=f"heartbeat-{self.role}")
-        await self._send(Frame(MessageType.HELLO, payload=encode_control({
-            "role": self.role, "version": 1, "nonce": secrets.token_hex(16), "window": INITIAL_WINDOW,
-        })))
+        await self._send_hello()
+        if self.handshake_retransmit > 0:
+            self._handshake = asyncio.create_task(
+                self._handshake_loop(), name=f"handshake-{self.role}")
+
+    async def _send_hello(self) -> None:
+        assert self._hello_payload is not None
+        await self._send(Frame(MessageType.HELLO, payload=self._hello_payload))
+
+    async def _handshake_loop(self) -> None:
+        # mstsc can silently drop a virtual channel's first write, which loses the
+        # opening HELLO and half-handshakes both peers. Retransmit HELLO until the
+        # handshake completes; the peer re-ACKs every HELLO, so a single delivered
+        # copy is enough to make both sides ready.
+        try:
+            while not self._ready.is_set() and not self._closed.is_set():
+                await asyncio.sleep(self.handshake_retransmit)
+                if self._ready.is_set() or self._closed.is_set():
+                    return
+                try:
+                    await self._send_hello()
+                except Exception:
+                    return
+        except asyncio.CancelledError:
+            return
 
     async def wait_ready(self, timeout: float = 15.0) -> None:
         await self._wait_event_or_closed(self._ready, timeout, "RDP channel disconnected during handshake")
@@ -433,10 +464,9 @@ class MuxPeer:
     async def _dispatch(self, frame: Frame) -> None:
         self._validate_frame_shape(frame)
         if frame.kind == MessageType.HELLO:
-            if self._hello_received:
-                raise ProtocolError("duplicate HELLO")
             hello = decode_control(frame.payload)
-            if hello.get("role") not in {"client", "agent"} or hello.get("role") == self.role:
+            role = hello.get("role")
+            if role not in {"client", "agent"} or role == self.role:
                 raise ProtocolError("invalid peer role")
             if hello.get("version") != 1:
                 raise ProtocolError("unsupported peer protocol version")
@@ -444,19 +474,23 @@ class MuxPeer:
             if isinstance(window, bool) or not isinstance(window, int) or window != INITIAL_WINDOW:
                 raise ProtocolError("unsupported peer stream window")
             self._hello_received = True
+            # Re-ACK every HELLO, not just the first: a retransmitted HELLO means
+            # the peer has not seen our HELLO_ACK (mstsc can drop a channel's
+            # first write), so the ACK must be resent for the handshake to finish.
             await self._send(Frame(
                 MessageType.HELLO_ACK, payload=encode_control({"ok": True, "version": 1}),
             ))
             self._maybe_ready()
             return
         if frame.kind == MessageType.HELLO_ACK:
-            if self._hello_ack_received:
-                raise ProtocolError("duplicate HELLO_ACK")
             ack = decode_control(frame.payload)
             if ack.get("ok") is not True or ack.get("version") != 1:
                 raise ProtocolError("handshake rejected")
-            self._hello_ack_received = True
-            self._maybe_ready()
+            # A duplicate ACK is expected once retransmitted HELLOs are in flight;
+            # accept the first and ignore the rest rather than tearing down.
+            if not self._hello_ack_received:
+                self._hello_ack_received = True
+                self._maybe_ready()
             return
         if not self._ready.is_set():
             raise ProtocolError("message received before handshake")
@@ -712,6 +746,9 @@ class MuxPeer:
             await self._closed.wait()
             return
         self._closing = True
+        if self._handshake and self._handshake is not asyncio.current_task():
+            self._handshake.cancel()
+            await asyncio.gather(self._handshake, return_exceptions=True)
         if self._heartbeat and self._heartbeat is not asyncio.current_task():
             self._heartbeat.cancel()
             await asyncio.gather(self._heartbeat, return_exceptions=True)
