@@ -8,7 +8,7 @@ from typing import Any
 
 from .actions import ActionError
 
-MAX_FILE = 64 * 1024 * 1024
+DEFAULT_MAX_UPLOAD = 128 * 1024 * 1024
 MAX_ENTRIES = 5000
 FILE_MODES = frozenset(("read", "write", "read_write"))
 
@@ -37,7 +37,11 @@ class FileStore:
     """Read and write files beneath one directory with glob-based permissions."""
 
     def __init__(self, root: str | Path | None = None, *, allowlist: list[FileRule] | None = None,
-                 denylist: list[str] | None = None, roots: list[FileRoot] | None = None) -> None:
+                 denylist: list[str] | None = None, roots: list[FileRoot] | None = None,
+                 max_upload: int = DEFAULT_MAX_UPLOAD) -> None:
+        if isinstance(max_upload, bool) or not isinstance(max_upload, int) or max_upload <= 0:
+            raise ValueError("max_upload must be a positive integer")
+        self.max_upload = max_upload
         if roots is not None:
             if not roots:
                 raise ValueError("file roots must not be empty")
@@ -133,15 +137,13 @@ class FileStore:
         if not target.is_file():
             raise ActionError(f"not a file: {path}")
         size = target.stat().st_size
-        if size > MAX_FILE:
-            raise ActionError(f"file of {size} bytes exceeds the {MAX_FILE} byte limit")
         return {"path": str(target), "size": size}, target.read_bytes()
 
     def write(self, path: str, data: bytes, *, create_parents: bool = False) -> dict[str, Any]:
         root, target = self._resolve(path)
         self._check_access(root, target, "write", path)
-        if len(data) > MAX_FILE:
-            raise ActionError(f"write of {len(data)} bytes exceeds the {MAX_FILE} byte limit")
+        if len(data) > self.max_upload:
+            raise ActionError(f"write of {len(data)} bytes exceeds the {self.max_upload} byte upload limit")
         if target.is_dir():
             raise ActionError(f"is a directory: {path}")
         if create_parents:

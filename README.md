@@ -436,6 +436,7 @@ deny patterns always take precedence:
 {
   "enable_file_transfer": true,
   "file_root": "D:\\temp",
+  "max_file_upload": 134217728,
   "file_allowlist": [
     {"pattern": "incoming/**", "mode": "read_write"},
     {"pattern": "reports/**", "mode": "read"},
@@ -451,6 +452,9 @@ deny patterns always take precedence:
 Valid modes are `read`, `write`, and `read_write`. If no allowlist is given,
 the whole configured root is allowed for read/write, subject to the denylist.
 Keep the root narrow and use an allowlist for production deployments.
+`max_file_upload` is in bytes and defaults to 128 MiB. It limits uploads only;
+downloads have no file-store size limit, although the control message transport
+still has a 128 MiB per-message ceiling.
 
 Multiple roots can be exposed with names. Requests then use the explicit
 `name:/relative/path` form, so paths cannot cross from one root into another:
@@ -458,6 +462,7 @@ Multiple roots can be exposed with names. Requests then use the explicit
 ```json
 {
   "enable_file_transfer": true,
+  "max_file_upload": 134217728,
   "file_roots": [
     {
       "name": "temp",

@@ -38,6 +38,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-task", action="append", default=[],
                         help="allow typed execution of this scheduled task name")
     parser.add_argument("--file-root", help="directory that file transfer is confined to")
+    parser.add_argument("--max-file-upload", type=int,
+                        help="maximum uploaded file size in bytes (default: 134217728)")
     parser.add_argument("--retry", type=float, default=2.0, help="seconds between channel-open attempts")
     parser.add_argument("--once", action="store_true", help="exit instead of waiting for an RDP reconnect")
     parser.add_argument("--verbose", action="store_true")
@@ -58,11 +60,12 @@ def _control_service(config):
             files = FileStore(roots=[
                 FileRoot(item.name, item.path, item.allowlist or None, item.denylist)
                 for item in config.file_roots
-            ])
+            ], max_upload=config.max_file_upload)
         else:
             files = FileStore(config.file_root or os.getcwd(),
                               allowlist=config.file_allowlist or None,
-                              denylist=config.file_denylist)
+                              denylist=config.file_denylist,
+                              max_upload=config.max_file_upload)
     logging.info("desktop control enabled (exec=%s, file transfer=%s)",
                  config.enable_exec, config.enable_file_transfer)
     return ControlService(WindowsBackend(), allow_exec=config.enable_exec, files=files,
@@ -89,6 +92,10 @@ async def _run(args) -> None:
     config.system_service_allowlist.extend(args.allow_service)
     config.system_task_allowlist.extend(args.allow_task)
     config.file_root = args.file_root or config.file_root
+    if args.max_file_upload is not None:
+        if args.max_file_upload <= 0:
+            raise ValueError("--max-file-upload must be positive")
+        config.max_file_upload = args.max_file_upload
     control = _control_service(config)
     while True:
         try:

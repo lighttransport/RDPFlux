@@ -9,6 +9,8 @@ from typing import Any
 
 from .control.files import FileRule
 
+DEFAULT_MAX_FILE_UPLOAD = 128 * 1024 * 1024
+
 
 class ConfigError(ValueError):
     pass
@@ -128,6 +130,7 @@ class AgentConfig:
     system_service_allowlist: list[str] = field(default_factory=list)
     system_task_allowlist: list[str] = field(default_factory=list)
     file_root: str = ""
+    max_file_upload: int = DEFAULT_MAX_FILE_UPLOAD
     file_allowlist: list[FileRule] = field(default_factory=list)
     file_denylist: list[str] = field(default_factory=list)
     file_roots: list[FileRootConfig] = field(default_factory=list)
@@ -290,6 +293,8 @@ def load_agent_config(path: str | Path | None) -> AgentConfig:
     if not isinstance(file_root, str):
         raise ConfigError("file_root must be a string")
     cfg.file_root = file_root
+    cfg.max_file_upload = _integer(raw.get("max_file_upload", cfg.max_file_upload),
+                                    "max_file_upload", minimum=1, maximum=4 * 1024 * 1024 * 1024)
     allowlist = raw.get("file_allowlist", [])
     if not isinstance(allowlist, list):
         raise ConfigError("file_allowlist must be an array")

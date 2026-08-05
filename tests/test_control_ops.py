@@ -70,6 +70,14 @@ def test_file_store_write_needs_an_existing_parent_without_create(tmp_path):
         FileStore(tmp_path).write("deep/nested/file.txt", b"x")
 
 
+def test_file_store_limits_uploads_but_not_downloads(tmp_path):
+    (tmp_path / "large.bin").write_bytes(b"12345")
+    store = FileStore(tmp_path, max_upload=4)
+    assert store.read("large.bin")[1] == b"12345"
+    with pytest.raises(ActionError, match="upload limit"):
+        store.write("upload.bin", b"12345")
+
+
 def test_file_store_allowlist_modes_and_denylist(tmp_path):
     (tmp_path / "read-only.txt").write_bytes(b"read")
     (tmp_path / "write-only.txt").write_bytes(b"old")

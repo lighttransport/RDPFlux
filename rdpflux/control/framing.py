@@ -9,7 +9,7 @@ from ..mux import MuxStream
 # Binary stays out of the JSON so a screenshot does not pay base64's 33% overhead
 # on a channel that writes in 1600-byte chunks.
 MAX_HEADER = 64 * 1024
-MAX_BODY = 32 * 1024 * 1024
+MAX_BODY = 128 * 1024 * 1024
 READ_CHUNK = 64 * 1024
 
 

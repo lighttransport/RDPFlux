@@ -117,12 +117,19 @@ def test_file_access_policy_is_loaded(tmp_path):
         '{"pattern":"out/**","mode":"write"}],'
         '"file_denylist":["safe/private/**"]}', encoding="utf-8")
     cfg = load_agent_config(agent)
+    assert cfg.max_file_upload == 128 * 1024 * 1024
     assert [(rule.pattern, rule.mode) for rule in cfg.file_allowlist] == [
         ("safe/**", "read"), ("out/**", "write")]
     assert cfg.file_denylist == ["safe/private/**"]
 
     agent.write_text('{"file_allowlist":[{"pattern":"**","mode":"delete"}]}', encoding="utf-8")
     with pytest.raises(ConfigError, match="mode"):
+        load_agent_config(agent)
+
+    agent.write_text('{"max_file_upload":1048576}', encoding="utf-8")
+    assert load_agent_config(agent).max_file_upload == 1048576
+    agent.write_text('{"max_file_upload":0}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="max_file_upload"):
         load_agent_config(agent)
 
 

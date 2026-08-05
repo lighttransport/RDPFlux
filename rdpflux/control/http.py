@@ -12,7 +12,7 @@ from .openapi import build_spec
 
 LOG = logging.getLogger(__name__)
 
-MAX_REQUEST_BODY = 64 * 1024 * 1024
+MAX_REQUEST_BODY = 128 * 1024 * 1024
 MAX_HEADERS = 64 * 1024
 _STATUS = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
            404: "Not Found", 405: "Method Not Allowed", 413: "Payload Too Large",
