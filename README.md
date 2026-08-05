@@ -153,6 +153,103 @@ rdpflux-client run --transport mstsc \
   --socks 127.0.0.1:1080
 ```
 
+### Direct private-network proxy
+
+If this Windows client can reach a Linux machine directly on the same private
+network, RDPFlux can also host a small TCP proxy on Windows. This path does not
+cross the RDP mux; it uses Python's standard asyncio sockets and is useful when
+you want a local Windows port for a Linux service:
+
+```json
+{
+  "proxy_forwards": [
+    {
+      "name": "linux-web",
+      "listen": "127.0.0.1:8081",
+      "target": "192.168.1.20:8080"
+    }
+  ]
+}
+```
+
+Or add one in a foreground launch:
+
+```text
+rdpflux-client run --transport mstsc --proxy 127.0.0.1:8081=192.168.1.20:8080
+```
+
+Connect to `127.0.0.1:8081` on Windows. The Windows host must have a route and
+firewall permission to the Linux target. Keep the listener on loopback unless
+you intentionally want to expose the Linux service to other hosts. A proxy
+rule is independent from `local_forwards`: the latter opens its target through
+the RDP agent, while `proxy_forwards` connects directly from Windows.
+
+### Bash-over-HTTP service on the remote host
+
+To expose an HTTP service running on the remote host at port `8000` to another
+machine on the private LAN, add a normal `local_forwards` rule to the Windows
+client configuration:
+
+```json
+{
+  "local_forwards": [
+    {
+      "name": "bash-over-http",
+      "listen": "192.168.100.6:18000",
+      "target": "127.0.0.1:8000"
+    }
+  ]
+}
+```
+
+The resulting path is:
+
+```text
+Linux -> Windows 192.168.100.6:18000 -> RDPFlux -> remote 127.0.0.1:8000
+```
+
+Configure the Linux bash-over-HTTP client to use
+`http://192.168.100.6:18000`. The Windows listener must bind to the LAN
+address (or `0.0.0.0`), not only `127.0.0.1`, and Windows Firewall must allow
+TCP `18000` from the Linux host on the trusted Private profile. If the service
+is only needed on Windows, bind the listener to `127.0.0.1:18000` instead.
+
+This differs from the RDPFlux control example, which uses the client-side
+control API on port `18080`, and from `proxy_forwards`, which connects directly
+from Windows to a Linux target. `local_forwards` is the correct rule for a
+remote service reached through the RDP agent.
+
+### Mutagen file synchronization
+
+RDPFlux can carry Mutagen's SSH transport through the RDP channel. The remote
+Windows host must have an SSH server (and Mutagen's normal SSH prerequisites),
+and the agent policy must allow that SSH target. Add a dedicated forward to the
+client configuration:
+
+```json
+{
+  "sync_forwards": [
+    {
+      "name": "mutagen-ssh",
+      "listen": "127.0.0.1:2223",
+      "target": "127.0.0.1:22"
+    }
+  ]
+}
+```
+
+After connecting with RDPFlux, create a Mutagen session from the local machine
+using Mutagen's SSH endpoint syntax:
+
+```text
+mutagen sync create ./project user@127.0.0.1:2223:C:/work/project
+```
+
+Use the path syntax accepted by the SSH server on the RDP host. The equivalent
+one-off foreground option is `--sync-ssh 127.0.0.1:2223=127.0.0.1:22`.
+`sync_forwards` is an intent-revealing alias for `local_forwards`; it does not
+change the tunnel protocol or grant the agent any additional network access.
+
 The optional client `limits` object accepts `max_streams` (`1..4096`),
 `connect_timeout` (a positive value up to 300 seconds), and `idle_timeout`
 (zero disables it). The same bounds apply to the agent's top-level
@@ -201,6 +298,9 @@ Enable it on the agent (opt-in, like reverse forwarding):
 ```powershell
 python -m rdpflux.agent --enable-control
 ```
+
+To run shell commands through the HTTP API, also enable execution and see the
+[`examples/bash-over-http`](examples/bash-over-http) client example.
 
 The client exposes a loopback REST API and OpenAPI spec. Add a `control` block to
 `client.json`:

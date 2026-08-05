@@ -6,6 +6,13 @@
       "target": "127.0.0.1:22"
     }
   ],
+  "sync_forwards": [
+    {
+      "name": "mutagen-ssh",
+      "listen": "127.0.0.1:2223",
+      "target": "127.0.0.1:22"
+    }
+  ],
   "socks": [
     {
       "listen": "127.0.0.1:1080"
@@ -22,4 +29,3 @@
     "idle_timeout": 0
   }
 }
-

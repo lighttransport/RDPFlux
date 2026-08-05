@@ -100,6 +100,31 @@ async def test_local_forward_large_payload():
 
 
 @pytest.mark.asyncio
+async def test_direct_proxy_forwards_to_private_network_endpoint():
+    echo = await start_echo_server()
+    echo_port = echo.sockets[0].getsockname()[1]
+    left, right = MemoryTransport.pair()
+    client_peer = MuxPeer(left, role="client")
+    agent_peer = MuxPeer(right, role="agent")
+    client = ClientForwarder(client_peer, ClientConfig(proxy_forwards=[
+        ForwardRule(Endpoint("127.0.0.1", 0), Endpoint("127.0.0.1", echo_port))
+    ]))
+    agent = AgentForwarder(agent_peer, AgentConfig())
+    await asyncio.gather(agent.start(), client.start())
+    local_port = client.servers[0].sockets[0].getsockname()[1]
+    reader, writer = await asyncio.open_connection("127.0.0.1", local_port)
+    writer.write(b"direct private-network proxy")
+    await writer.drain()
+    assert await reader.readexactly(28) == b"direct private-network proxy"
+    writer.close()
+    await writer.wait_closed()
+    await client.close()
+    await agent.close()
+    echo.close()
+    await echo.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_handshake_survives_dropped_first_write():
     """mstsc drops the client's first channel write, losing its opening HELLO.
 

@@ -59,3 +59,25 @@ def test_configuration_rejects_malformed_collections(tmp_path):
         load_client_config(client)
     with pytest.raises(ConfigError, match="port range"):
         parse_allowed_target("127.0.0.1:nope")
+
+
+def test_sync_forwards_are_loaded_separately(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text(
+        '{"sync_forwards":[{"name":"mutagen","listen":"127.0.0.1:2223",'
+        '"target":"127.0.0.1:22"}]}', encoding="utf-8")
+    cfg = load_client_config(client)
+    assert cfg.local_forwards == []
+    assert len(cfg.sync_forwards) == 1
+    assert cfg.sync_forwards[0].name == "mutagen"
+
+
+def test_proxy_forwards_are_loaded_separately(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text(
+        '{"proxy_forwards":[{"name":"linux-service","listen":"127.0.0.1:9000",'
+        '"target":"192.168.1.20:9000"}]}', encoding="utf-8")
+    cfg = load_client_config(client)
+    assert cfg.local_forwards == []
+    assert cfg.sync_forwards == []
+    assert cfg.proxy_forwards[0].target == Endpoint("192.168.1.20", 9000)

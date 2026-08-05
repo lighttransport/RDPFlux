@@ -41,6 +41,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--transport", choices=("mstsc", "freerdp"), default="mstsc" if os.name == "nt" else "freerdp")
     run.add_argument("--config")
     run.add_argument("--local", action="append", type=_forward, default=[])
+    run.add_argument("--sync-ssh", action="append", type=_forward, default=[],
+                     help="forward a local SSH port for Mutagen or another sync tool")
+    run.add_argument("--proxy", action="append", type=_forward, default=[],
+                     help="directly proxy a local port to a private-network endpoint")
     run.add_argument("--socks", action="append", default=[])
     run.add_argument("--reverse", action="append", type=_forward, default=[])
     run.add_argument("--verbose", action="store_true")
@@ -90,6 +94,8 @@ def _configure_logging(args, embedding: bool) -> None:
 def _config(args) -> ClientConfig:
     cfg = load_client_config(optional_config(args.config, default_client_config()))
     cfg.local_forwards.extend(args.local)
+    cfg.sync_forwards.extend(args.sync_ssh)
+    cfg.proxy_forwards.extend(args.proxy)
     cfg.reverse_forwards.extend(args.reverse)
     for value in args.socks:
         cfg.socks.append(parse_endpoint(value, default_host="127.0.0.1"))
@@ -152,8 +158,9 @@ def main(argv: list[str] | None = None) -> int:
     # escapes here would look like a silent startup failure in the log.
     try:
         config = _config(args)
-        LOG.info("config: %d local, %d socks, %d reverse", len(config.local_forwards),
-                 len(config.socks), len(config.reverse_forwards))
+        LOG.info("config: %d local, %d sync, %d proxy, %d socks, %d reverse",
+                 len(config.local_forwards), len(config.sync_forwards),
+                 len(config.proxy_forwards), len(config.socks), len(config.reverse_forwards))
         if args.transport == "freerdp":
             asyncio.run(_run_freerdp(config))
             return 0

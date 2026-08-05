@@ -237,8 +237,9 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
                 add_ref(channel)
                 self.channel_ref = True
                 channel_config = reloader.current()
-                LOG.info("channel config: %d local, %d socks, %d reverse",
-                         len(channel_config.local_forwards), len(channel_config.socks),
+                LOG.info("channel config: %d local, %d sync, %d proxy, %d socks, %d reverse",
+                         len(channel_config.local_forwards), len(channel_config.sync_forwards),
+                         len(channel_config.proxy_forwards), len(channel_config.socks),
                          len(channel_config.reverse_forwards))
                 self.runtime = _ChannelRuntime(channel, channel_config)
                 # The channel is not writable until mstsc has accepted this

@@ -64,6 +64,13 @@ class ForwardRule:
 @dataclass(slots=True)
 class ClientConfig:
     local_forwards: list[ForwardRule] = field(default_factory=list)
+    # Convenience namespace for file synchronization tools such as Mutagen.
+    # These are TCP forwards, just like local_forwards, but are kept separate
+    # so that a configuration documents which listeners are sync-related.
+    sync_forwards: list[ForwardRule] = field(default_factory=list)
+    # Direct TCP proxies from this client machine to another private-network
+    # endpoint. These do not cross the RDP mux.
+    proxy_forwards: list[ForwardRule] = field(default_factory=list)
     socks: list[Endpoint] = field(default_factory=list)
     reverse_forwards: list[ForwardRule] = field(default_factory=list)
     # When set, expose the remote desktop-control service as a loopback REST API.
@@ -170,6 +177,8 @@ def load_client_config(path: str | Path | None) -> ClientConfig:
     raw = _load_json(path)
     cfg = ClientConfig()
     cfg.local_forwards = [_rule(v, "local_forwards") for v in _array(raw, "local_forwards")]
+    cfg.sync_forwards = [_rule(v, "sync_forwards") for v in _array(raw, "sync_forwards")]
+    cfg.proxy_forwards = [_rule(v, "proxy_forwards") for v in _array(raw, "proxy_forwards")]
     cfg.reverse_forwards = [_rule(v, "reverse_forwards") for v in _array(raw, "reverse_forwards")]
     cfg.socks = []
     for value in _array(raw, "socks"):

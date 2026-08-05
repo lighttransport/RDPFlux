@@ -83,6 +83,53 @@ async def bridge_socket(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             await writer.wait_closed()
 
 
+async def bridge_tcp(left_reader: asyncio.StreamReader, left_writer: asyncio.StreamWriter,
+                     right_reader: asyncio.StreamReader, right_writer: asyncio.StreamWriter,
+                     idle_timeout: float = 0.0) -> None:
+    """Bridge two ordinary TCP connections without involving the RDP mux."""
+    loop = asyncio.get_running_loop()
+    last_activity = loop.time()
+
+    async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal last_activity
+        while data := await reader.read(16 * 1024):
+            last_activity = loop.time()
+            writer.write(data)
+            await writer.drain()
+        if writer.can_write_eof():
+            writer.write_eof()
+            await writer.drain()
+
+    async def idle_monitor() -> None:
+        while True:
+            await asyncio.sleep(min(1.0, idle_timeout))
+            if loop.time() - last_activity >= idle_timeout:
+                raise TimeoutError("idle timeout")
+
+    pumps = {
+        asyncio.create_task(pump(left_reader, right_writer)),
+        asyncio.create_task(pump(right_reader, left_writer)),
+    }
+    monitor = asyncio.create_task(idle_monitor()) if idle_timeout > 0 else None
+    try:
+        watched = set(pumps)
+        if monitor:
+            watched.add(monitor)
+        await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if monitor:
+            monitor.cancel()
+        for task in pumps:
+            task.cancel()
+        await asyncio.gather(*pumps, return_exceptions=True)
+        if monitor:
+            await asyncio.gather(monitor, return_exceptions=True)
+        for tcp_writer in (left_writer, right_writer):
+            tcp_writer.close()
+        await asyncio.gather(left_writer.wait_closed(), right_writer.wait_closed(),
+                             return_exceptions=True)
+
+
 class ClientForwarder:
     def __init__(self, peer: MuxPeer, config: ClientConfig) -> None:
         self.peer = peer
@@ -108,13 +155,20 @@ class ClientForwarder:
     async def start(self) -> None:
         await self.peer.start()
         await self.peer.wait_ready()
-        for rule in self.config.local_forwards:
+        for rule in [*self.config.local_forwards, *self.config.sync_forwards]:
             server = await asyncio.start_server(
                 lambda r, w, item=rule: self._accept(self._handle_local(r, w, item), w),
                 rule.listen.host, rule.listen.port,
             )
             self.servers.append(server)
             LOG.info("local forward %s -> %s", rule.listen, rule.target)
+        for rule in self.config.proxy_forwards:
+            server = await asyncio.start_server(
+                lambda r, w, item=rule: self._accept(self._handle_proxy(r, w, item), w),
+                rule.listen.host, rule.listen.port,
+            )
+            self.servers.append(server)
+            LOG.info("direct proxy %s -> %s", rule.listen, rule.target)
         for endpoint in self.config.socks:
             server = await asyncio.start_server(
                 lambda r, w: self._accept(self._handle_socks(r, w), w), endpoint.host, endpoint.port,
@@ -151,6 +205,25 @@ class ClientForwarder:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+
+    async def _handle_proxy(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                            rule: ForwardRule) -> None:
+        target_writer: asyncio.StreamWriter | None = None
+        try:
+            target_reader, target_writer = await asyncio.wait_for(
+                asyncio.open_connection(rule.target.host, rule.target.port),
+                self.config.connect_timeout,
+            )
+            await bridge_tcp(reader, writer, target_reader, target_writer, self.config.idle_timeout)
+        except Exception as exc:
+            LOG.warning("direct proxy to %s failed: %s", rule.target, describe_exception(exc))
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            if target_writer is not None:
+                target_writer.close()
+                with contextlib.suppress(Exception):
+                    await target_writer.wait_closed()
 
     async def _handle_socks(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         stream: MuxStream | None = None
