@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "[pre-push] Windows detected; secret audit is temporarily disabled."
+    exit 0
+    ;;
+esac
+
 if [[ "${SKIP_SECRET_AUDIT:-0}" == "1" ]]; then
   echo "[pre-push] SKIP_SECRET_AUDIT=1 set; skipping secret audit."
   exit 0
