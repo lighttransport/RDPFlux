@@ -409,10 +409,11 @@ falls back to PNG.
 ### Control security model
 
 - Screen capture and input are off unless `--enable-control` is set.
-- **Shell execution** (`--enable-exec`) and **file transfer** (`--enable-file-transfer
-  --file-root DIR`) are separate flags, because they turn desktop control into
-  arbitrary remote code execution. File transfer is confined to `--file-root`;
-  paths that escape it (including `..` and symlinks) are rejected.
+- **Shell execution** (`--enable-exec`) and **file transfer** (`--enable-file-transfer`)
+  are separate flags, because they turn desktop control into arbitrary remote
+  code execution. File transfer is confined to `file_root` (the agent launch
+  directory by default), with optional glob allow/deny rules; paths that escape
+  the root (including `..` and symlinks) are rejected.
 - Typed system operations require `--enable-system-ops`; process termination,
   service control, and scheduled-task execution additionally require their
   explicit allowlists.
@@ -422,6 +423,59 @@ falls back to PNG.
 - Windows limits apply: input from a non-elevated agent cannot drive elevated
   windows or the UAC secure desktop, and capture returns black if the RDP session
   is disconnected, so mstsc must stay connected.
+
+### File access policy
+
+File transfer is disabled unless `enable_file_transfer` is set. When enabled,
+the file root defaults to the agent's launch directory; set `file_root` to use
+another directory such as `D:\\temp`. API paths remain relative to that root.
+An optional allowlist uses Python-style glob patterns and explicit permissions;
+deny patterns always take precedence:
+
+```json
+{
+  "enable_file_transfer": true,
+  "file_root": "D:\\temp",
+  "file_allowlist": [
+    {"pattern": "incoming/**", "mode": "read_write"},
+    {"pattern": "reports/**", "mode": "read"},
+    {"pattern": "outgoing/**", "mode": "write"}
+  ],
+  "file_denylist": [
+    "incoming/private/**",
+    "reports/secrets/**"
+  ]
+}
+```
+
+Valid modes are `read`, `write`, and `read_write`. If no allowlist is given,
+the whole configured root is allowed for read/write, subject to the denylist.
+Keep the root narrow and use an allowlist for production deployments.
+
+Multiple roots can be exposed with names. Requests then use the explicit
+`name:/relative/path` form, so paths cannot cross from one root into another:
+
+```json
+{
+  "enable_file_transfer": true,
+  "file_roots": [
+    {
+      "name": "temp",
+      "path": "D:\\temp",
+      "allowlist": [{"pattern": "tests/**", "mode": "read_write"}]
+    },
+    {
+      "name": "reports",
+      "path": "D:\\reports",
+      "allowlist": [{"pattern": "**", "mode": "read"}],
+      "denylist": ["private/**"]
+    }
+  ]
+}
+```
+
+Use `temp:/tests/sample.txt` or `reports:/2026/summary.txt` as the API path.
+`file_roots` takes precedence over the legacy singular `file_root` setting.
 
 ## Standalone builds
 

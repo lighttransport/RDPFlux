@@ -49,14 +49,20 @@ def _control_service(config):
     if not config.enable_control:
         return None
     from .control.backend import WindowsBackend
-    from .control.files import FileStore
+    from .control.files import FileRoot, FileStore
     from .control.service import ControlService
 
     files = None
     if config.enable_file_transfer:
-        if not config.file_root:
-            raise RuntimeError("file transfer requires --file-root")
-        files = FileStore(config.file_root)
+        if config.file_roots:
+            files = FileStore(roots=[
+                FileRoot(item.name, item.path, item.allowlist or None, item.denylist)
+                for item in config.file_roots
+            ])
+        else:
+            files = FileStore(config.file_root or os.getcwd(),
+                              allowlist=config.file_allowlist or None,
+                              denylist=config.file_denylist)
     logging.info("desktop control enabled (exec=%s, file transfer=%s)",
                  config.enable_exec, config.enable_file_transfer)
     return ControlService(WindowsBackend(), allow_exec=config.enable_exec, files=files,

@@ -192,6 +192,8 @@ class ClientForwarder:
         listen = self.config.control_listen
         server = ControlHTTPServer(
             ControlClient(self.peer), token=self.config.control_token,
+            exec_enabled=self.config.enable_exec,
+            files_enabled=self.config.enable_file_transfer,
             system_enabled=self.config.control_system_ops,
             clipboard_enabled=self.config.control_clipboard,
         )

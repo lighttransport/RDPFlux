@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .control.files import FileRule
+
 
 class ConfigError(ValueError):
     pass
@@ -59,6 +61,14 @@ class ForwardRule:
     listen: Endpoint
     target: Endpoint
     name: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class FileRootConfig:
+    name: str
+    path: str
+    allowlist: list[FileRule] = field(default_factory=list)
+    denylist: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -118,6 +128,9 @@ class AgentConfig:
     system_service_allowlist: list[str] = field(default_factory=list)
     system_task_allowlist: list[str] = field(default_factory=list)
     file_root: str = ""
+    file_allowlist: list[FileRule] = field(default_factory=list)
+    file_denylist: list[str] = field(default_factory=list)
+    file_roots: list[FileRootConfig] = field(default_factory=list)
     max_streams: int = 128
     connect_timeout: float = 15.0
 
@@ -277,6 +290,54 @@ def load_agent_config(path: str | Path | None) -> AgentConfig:
     if not isinstance(file_root, str):
         raise ConfigError("file_root must be a string")
     cfg.file_root = file_root
+    allowlist = raw.get("file_allowlist", [])
+    if not isinstance(allowlist, list):
+        raise ConfigError("file_allowlist must be an array")
+    for item in allowlist:
+        if not isinstance(item, dict) or not isinstance(item.get("pattern"), str):
+            raise ConfigError("file_allowlist entries require a pattern")
+        mode = item.get("mode")
+        if mode not in ("read", "write", "read_write"):
+            raise ConfigError("file_allowlist mode must be read, write, or read_write")
+        if not item["pattern"].strip():
+            raise ConfigError("file_allowlist patterns must be non-empty")
+        cfg.file_allowlist.append(FileRule(item["pattern"].strip(), mode))
+    denylist = raw.get("file_denylist", [])
+    if (not isinstance(denylist, list)
+            or not all(isinstance(value, str) and value.strip() for value in denylist)):
+        raise ConfigError("file_denylist must be an array of non-empty strings")
+    cfg.file_denylist.extend(value.strip() for value in denylist)
+    roots = raw.get("file_roots", [])
+    if not isinstance(roots, list):
+        raise ConfigError("file_roots must be an array")
+    for item in roots:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ConfigError("file_roots entries require a name")
+        name = item["name"].strip()
+        path = item.get("path")
+        if not name or not isinstance(path, str) or not path.strip():
+            raise ConfigError("file_roots entries require non-empty name and path")
+        if any(char in name for char in ":/\\"):
+            raise ConfigError("file root names must not contain ':', '/', or '\\'")
+        root_allow = item.get("allowlist", [])
+        if not isinstance(root_allow, list):
+            raise ConfigError("file root allowlist must be an array")
+        parsed_allow: list[FileRule] = []
+        for rule in root_allow:
+            if not isinstance(rule, dict) or not isinstance(rule.get("pattern"), str):
+                raise ConfigError("file root allowlist entries require a pattern")
+            mode = rule.get("mode")
+            if mode not in ("read", "write", "read_write"):
+                raise ConfigError("file root allowlist mode must be read, write, or read_write")
+            if not rule["pattern"].strip():
+                raise ConfigError("file root allowlist patterns must be non-empty")
+            parsed_allow.append(FileRule(rule["pattern"].strip(), mode))
+        root_deny = item.get("denylist", [])
+        if (not isinstance(root_deny, list)
+                or not all(isinstance(value, str) and value.strip() for value in root_deny)):
+            raise ConfigError("file root denylist must be an array of non-empty strings")
+        cfg.file_roots.append(FileRootConfig(name, path.strip(), parsed_allow,
+                                              [value.strip() for value in root_deny]))
     cfg.max_streams = _integer(raw.get("max_streams", cfg.max_streams), "max_streams",
                                minimum=1, maximum=4096)
     cfg.connect_timeout = _number(raw.get("connect_timeout", cfg.connect_timeout),

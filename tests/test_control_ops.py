@@ -6,7 +6,7 @@ import pytest
 from rdpflux.control import execute
 from rdpflux.control.actions import ActionError
 from rdpflux.control.client import ControlClient, ControlError
-from rdpflux.control.files import FileStore
+from rdpflux.control.files import FileRoot, FileRule, FileStore
 from rdpflux.control.service import ControlService
 from rdpflux.forwarding import AgentForwarder
 from rdpflux.mux import MuxPeer
@@ -68,6 +68,59 @@ def test_file_store_requires_an_existing_root(tmp_path):
 def test_file_store_write_needs_an_existing_parent_without_create(tmp_path):
     with pytest.raises(ActionError, match="parent directory does not exist"):
         FileStore(tmp_path).write("deep/nested/file.txt", b"x")
+
+
+def test_file_store_allowlist_modes_and_denylist(tmp_path):
+    (tmp_path / "read-only.txt").write_bytes(b"read")
+    (tmp_path / "write-only.txt").write_bytes(b"old")
+    (tmp_path / "private.txt").write_bytes(b"secret")
+    store = FileStore(
+        tmp_path,
+        allowlist=[
+            FileRule("read-only.txt", "read"),
+            FileRule("write-only.txt", "write"),
+            FileRule("private.txt", "read_write"),
+        ],
+        denylist=["private.txt"],
+    )
+    assert store.read("read-only.txt")[1] == b"read"
+    with pytest.raises(ActionError, match="read access is denied"):
+        store.read("write-only.txt")
+    with pytest.raises(ActionError, match="write access is denied"):
+        store.write("read-only.txt", b"no")
+    with pytest.raises(ActionError, match="read access is denied"):
+        store.read("private.txt")
+    with pytest.raises(ActionError, match="write access is denied"):
+        store.write("private.txt", b"no")
+    assert store.write("write-only.txt", b"new")["size"] == 3
+
+
+def test_file_store_glob_rules_cover_subdirectories(tmp_path):
+    (tmp_path / "safe").mkdir()
+    (tmp_path / "safe" / "nested.txt").write_bytes(b"ok")
+    (tmp_path / "blocked").mkdir()
+    (tmp_path / "blocked" / "nested.txt").write_bytes(b"no")
+    store = FileStore(tmp_path, allowlist=[FileRule("safe/**", "read_write")],
+                      denylist=["safe/private/**"])
+    assert store.read("safe/nested.txt")[1] == b"ok"
+    with pytest.raises(ActionError, match="access is denied"):
+        store.read("blocked/nested.txt")
+
+
+def test_file_store_names_multiple_roots(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "one.txt").write_bytes(b"one")
+    (second / "two.txt").write_bytes(b"two")
+    store = FileStore(roots=[FileRoot("one", first), FileRoot("two", second)])
+    assert store.read("one:/one.txt")[1] == b"one"
+    assert store.read("two:/two.txt")[1] == b"two"
+    with pytest.raises(ActionError, match="root prefix"):
+        store.read("one.txt")
+    with pytest.raises(ActionError, match="unknown file root"):
+        store.read("other:/file.txt")
 
 
 # --- exec ----------------------------------------------------------------

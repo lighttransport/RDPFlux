@@ -107,3 +107,42 @@ def test_control_capabilities_are_loaded_and_validated(tmp_path):
     agent.write_text('{"system_service_allowlist":"Spooler"}', encoding="utf-8")
     with pytest.raises(ConfigError, match="array"):
         load_agent_config(agent)
+
+
+def test_file_access_policy_is_loaded(tmp_path):
+    agent = tmp_path / "agent.json"
+    agent.write_text(
+        '{"enable_file_transfer":true,"file_allowlist":['
+        '{"pattern":"safe/**","mode":"read"},'
+        '{"pattern":"out/**","mode":"write"}],'
+        '"file_denylist":["safe/private/**"]}', encoding="utf-8")
+    cfg = load_agent_config(agent)
+    assert [(rule.pattern, rule.mode) for rule in cfg.file_allowlist] == [
+        ("safe/**", "read"), ("out/**", "write")]
+    assert cfg.file_denylist == ["safe/private/**"]
+
+    agent.write_text('{"file_allowlist":[{"pattern":"**","mode":"delete"}]}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="mode"):
+        load_agent_config(agent)
+
+
+def test_multiple_file_roots_are_loaded(tmp_path):
+    agent = tmp_path / "agent.json"
+    agent.write_text(
+        '{"enable_file_transfer":true,"file_roots":['
+        '{"name":"temp","path":"D:\\\\temp",'
+        '"allowlist":[{"pattern":"**","mode":"read_write"}]},'
+        '{"name":"reports","path":"D:\\\\reports",'
+        '"allowlist":[{"pattern":"**","mode":"read"}],'
+        '"denylist":["private/**"]}]}', encoding="utf-8")
+    cfg = load_agent_config(agent)
+    assert [(root.name, root.path) for root in cfg.file_roots] == [
+        ("temp", "D:\\temp"), ("reports", "D:\\reports")]
+    assert cfg.file_roots[1].allowlist[0].mode == "read"
+    assert cfg.file_roots[1].denylist == ["private/**"]
+
+    agent.write_text(
+        '{"file_roots":[{"name":"bad/name","path":"D:\\\\temp"}]}',
+        encoding="utf-8")
+    with pytest.raises(ConfigError, match="root names"):
+        load_agent_config(agent)
