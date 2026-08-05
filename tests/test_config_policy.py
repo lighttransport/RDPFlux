@@ -81,3 +81,29 @@ def test_proxy_forwards_are_loaded_separately(tmp_path):
     assert cfg.local_forwards == []
     assert cfg.sync_forwards == []
     assert cfg.proxy_forwards[0].target == Endpoint("192.168.1.20", 9000)
+
+
+def test_control_capabilities_are_loaded_and_validated(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text(
+        '{"control":{"system_ops":true,"clipboard":true}}', encoding="utf-8")
+    cfg = load_client_config(client)
+    assert cfg.control_system_ops is True
+    assert cfg.control_clipboard is True
+
+    agent = tmp_path / "agent.json"
+    agent.write_text(
+        '{"enable_system_ops":true,"enable_clipboard":true,'
+        '"allow_process_terminate":true,'
+        '"system_service_allowlist":["Spooler"],'
+        '"system_task_allowlist":["Demo"]}', encoding="utf-8")
+    cfg = load_agent_config(agent)
+    assert cfg.enable_system_ops is True
+    assert cfg.enable_clipboard is True
+    assert cfg.allow_process_terminate is True
+    assert cfg.system_service_allowlist == ["Spooler"]
+    assert cfg.system_task_allowlist == ["Demo"]
+
+    agent.write_text('{"system_service_allowlist":"Spooler"}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="array"):
+        load_agent_config(agent)

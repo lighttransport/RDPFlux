@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ..mux import MuxPeer
@@ -8,6 +9,51 @@ from .framing import FramingError, MessageReader, encode_message
 
 class ControlError(Exception):
     """The agent rejected a control request."""
+
+
+class ShellSession:
+    """Long-lived remote shell over one control mux stream."""
+
+    def __init__(self, stream, reader: MessageReader, timeout: float) -> None:
+        self.stream = stream
+        self.reader = reader
+        self.timeout = timeout
+        self.closed = False
+
+    async def run(self, command: str, on_output=None) -> int | None:
+        if self.closed:
+            raise ControlError("shell session is closed")
+        await self.stream.write(encode_message({"op": "input", "params": {"command": command}}))
+        while True:
+            message = await asyncio.wait_for(self.reader.read_message(), self.timeout)
+            if message is None:
+                raise ControlError("shell session closed while running command")
+            header, body = message
+            if not header.get("ok"):
+                raise ControlError(str(header.get("error", "shell operation failed")))
+            kind = header.get("kind")
+            if kind == "stdout":
+                if on_output is not None:
+                    value = on_output(body.decode("utf-8", "replace"))
+                    if asyncio.iscoroutine(value):
+                        await value
+            elif kind == "result":
+                return header.get("exit_code")
+            elif kind == "error":
+                raise ControlError(str(header.get("error", "shell command failed")))
+
+    async def interrupt(self) -> None:
+        if not self.closed:
+            await self.stream.write(encode_message({"op": "interrupt"}))
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            await self.stream.write(encode_message({"op": "close"}))
+        finally:
+            await self.stream.close()
 
 
 class ControlClient:
@@ -39,6 +85,24 @@ class ControlClient:
             raise ControlError(str(exc)) from exc
         finally:
             await stream.close()
+
+    async def open_shell(self, *, program: str = "powershell",
+                         cwd: str | None = None) -> ShellSession:
+        stream = await self.peer.open_stream({"kind": "control"}, self.timeout)
+        params: dict[str, Any] = {"program": program}
+        if cwd is not None:
+            params["cwd"] = cwd
+        await stream.write(encode_message({"op": "shell_open", "params": params}))
+        reader = MessageReader(stream)
+        message = await asyncio.wait_for(reader.read_message(), self.timeout)
+        if message is None:
+            await stream.close()
+            raise ControlError("agent closed the shell session")
+        header, _body = message
+        if not header.get("ok"):
+            await stream.close()
+            raise ControlError(str(header.get("error", "shell session rejected")))
+        return ShellSession(stream, reader, self.timeout)
 
     async def screenshot(self, *, width: int | None = None, image_format: str = "png",
                          quality: int = 80) -> tuple[dict[str, Any], bytes]:
@@ -84,4 +148,17 @@ class ControlClient:
 
     async def list_dir(self, path: str = ".") -> dict[str, Any]:
         result, _ = await self.request("list_dir", {"path": path})
+        return result
+
+    async def system(self, operation: str, **params: Any) -> dict[str, Any]:
+        """Run one typed, opt-in Windows system operation."""
+        result, _ = await self.request(f"system_{operation}", params)
+        return result
+
+    async def clipboard_read(self) -> dict[str, Any]:
+        result, _ = await self.request("clipboard_read")
+        return result
+
+    async def clipboard_write(self, text: str) -> dict[str, Any]:
+        result, _ = await self.request("clipboard_write", {"text": text})
         return result

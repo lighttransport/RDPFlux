@@ -329,6 +329,74 @@ action vocabulary mirrors Anthropic's computer-use tool (`screenshot`,
 the delivered screenshot's pixel space; the agent scales them to the native
 display, so the model never handles two coordinate systems.
 
+### Persistent shell and system control
+
+Enable the persistent shell with `--enable-exec`. The control mux supports a
+long-lived PowerShell session (or Bash/WSL when explicitly selected) with
+incremental output, interruption, and cleanup. The REST API exposes session
+creation and command execution under `/v1/sessions`.
+
+Typed process, service, task, and diagnostic operations require a separate
+agent opt-in:
+
+```powershell
+rdpflux-agent --enable-control --enable-system-ops
+```
+
+Process termination, service mutations, and scheduled-task execution are more
+restrictive and require explicit permissions, for example:
+
+```powershell
+rdpflux-agent --enable-system-ops --allow-process-terminate `
+  --allow-service Spooler --allow-task MyApprovedTask
+```
+
+Text clipboard access is separately gated:
+
+```powershell
+rdpflux-agent --enable-control --enable-clipboard
+```
+
+The client control block can advertise these optional APIs in OpenAPI:
+
+```json
+{
+  "control": {
+    "listen": "127.0.0.1:18080",
+    "token": "a-long-random-string",
+    "system_ops": true,
+    "clipboard": true
+  }
+}
+```
+
+For general PowerShell automation, prefer PowerShell Remoting over SSH when an
+OpenSSH server is installed on the remote Windows host. Reuse a normal RDPFlux
+local forward:
+
+```json
+{
+  "local_forwards": [
+    {
+      "name": "remote-ssh",
+      "listen": "127.0.0.1:2222",
+      "target": "127.0.0.1:22"
+    }
+  ]
+}
+```
+
+Then connect from the Windows client with either OpenSSH or PowerShell:
+
+```text
+ssh -p 2222 user@127.0.0.1
+Enter-PSSession -HostName 127.0.0.1 -Port 2222 -UserName user
+```
+
+WinRM over HTTPS can be carried similarly by forwarding remote `127.0.0.1:5986`
+to a local loopback port. Prefer HTTPS and existing Windows authentication; do
+not expose WinRM or SSH listeners to an untrusted network.
+
 For Claude Desktop or Claude Code, run an MCP server that bridges to the REST API:
 
 ```text
@@ -345,6 +413,10 @@ falls back to PNG.
   --file-root DIR`) are separate flags, because they turn desktop control into
   arbitrary remote code execution. File transfer is confined to `--file-root`;
   paths that escape it (including `..` and symlinks) are rejected.
+- Typed system operations require `--enable-system-ops`; process termination,
+  service control, and scheduled-task execution additionally require their
+  explicit allowlists.
+- Clipboard access requires `--enable-clipboard` and is limited to text.
 - The client REST listener binds loopback and requires a bearer token — any local
   process can otherwise reach a loopback port.
 - Windows limits apply: input from a non-elevated agent cannot drive elevated

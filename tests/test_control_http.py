@@ -7,6 +7,7 @@ from rdpflux.control.client import ControlClient
 from rdpflux.control.http import ControlHTTPServer
 from rdpflux.control.openapi import build_spec
 from rdpflux.control.service import ControlService
+from rdpflux.control import system
 from rdpflux.forwarding import AgentForwarder
 from rdpflux.mux import MuxPeer
 from rdpflux.transport import MemoryTransport
@@ -54,7 +55,9 @@ async def serve(token="secret", **service_kwargs):
 
     http = ControlHTTPServer(ControlClient(client_peer), token=token,
                              exec_enabled=service_kwargs.get("allow_exec", False),
-                             files_enabled=service_kwargs.get("files") is not None)
+                             files_enabled=service_kwargs.get("files") is not None,
+                             system_enabled=service_kwargs.get("system_enabled", False),
+                             clipboard_enabled=service_kwargs.get("clipboard_enabled", False))
     server = await http.start("127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
 
@@ -143,6 +146,23 @@ async def test_invalid_action_surfaces_as_bad_gateway():
 
 
 @pytest.mark.asyncio
+async def test_system_processes_route_is_forwarded(monkeypatch):
+    async def fake_process_list():
+        return {"processes": [{"Id": 123, "ProcessName": "demo"}]}
+
+    monkeypatch.setattr(system, "process_list", fake_process_list)
+    port, _, close = await serve(system_enabled=True)
+    try:
+        status, headers, payload = await raw_request(
+            port, "GET", "/v1/system/processes", token="secret")
+        assert status == 200
+        assert headers["content-type"] == "application/json"
+        assert json.loads(payload) == {"processes": [{"Id": 123, "ProcessName": "demo"}]}
+    finally:
+        await close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_route_is_404():
     port, _, close = await serve()
     try:
@@ -177,6 +197,11 @@ def test_openapi_spec_gates_optional_ops():
     full = build_spec(exec_enabled=True, files_enabled=True)
     assert "/v1/exec" in full["paths"]
     assert "/v1/file" in full["paths"]
+    system = build_spec(exec_enabled=False, files_enabled=False, system_enabled=True,
+                        clipboard_enabled=True)
+    assert "/v1/system/processes" in system["paths"]
+    assert "/v1/system/services/control" in system["paths"]
+    assert "/v1/clipboard" in system["paths"]
     # The action schema enumerates every action as a oneOf variant.
     variants = full["paths"]["/v1/action"]["post"]["requestBody"]["content"]["application/json"]["schema"]["oneOf"]
     names = {v["properties"]["action"]["const"] for v in variants}

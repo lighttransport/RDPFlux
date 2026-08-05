@@ -27,6 +27,16 @@ def _parser() -> argparse.ArgumentParser:
                         help="allow the client to run commands (implies remote code execution)")
     parser.add_argument("--enable-file-transfer", action="store_true",
                         help="allow the client to read and write files under --file-root")
+    parser.add_argument("--enable-system-ops", action="store_true",
+                        help="allow typed process, service, task, and diagnostic operations")
+    parser.add_argument("--enable-clipboard", action="store_true",
+                        help="allow reading and writing text on the remote clipboard")
+    parser.add_argument("--allow-process-terminate", action="store_true",
+                        help="allow the typed process termination operation")
+    parser.add_argument("--allow-service", action="append", default=[],
+                        help="allow typed control of this service name")
+    parser.add_argument("--allow-task", action="append", default=[],
+                        help="allow typed execution of this scheduled task name")
     parser.add_argument("--file-root", help="directory that file transfer is confined to")
     parser.add_argument("--retry", type=float, default=2.0, help="seconds between channel-open attempts")
     parser.add_argument("--once", action="store_true", help="exit instead of waiting for an RDP reconnect")
@@ -49,7 +59,12 @@ def _control_service(config):
         files = FileStore(config.file_root)
     logging.info("desktop control enabled (exec=%s, file transfer=%s)",
                  config.enable_exec, config.enable_file_transfer)
-    return ControlService(WindowsBackend(), allow_exec=config.enable_exec, files=files)
+    return ControlService(WindowsBackend(), allow_exec=config.enable_exec, files=files,
+                          system_enabled=config.enable_system_ops,
+                          allow_process_terminate=config.allow_process_terminate,
+                          service_allowlist=config.system_service_allowlist,
+                          task_allowlist=config.system_task_allowlist,
+                          clipboard_enabled=config.enable_clipboard)
 
 
 async def _run(args) -> None:
@@ -62,6 +77,11 @@ async def _run(args) -> None:
     config.enable_control = config.enable_control or args.enable_control
     config.enable_exec = config.enable_exec or args.enable_exec
     config.enable_file_transfer = config.enable_file_transfer or args.enable_file_transfer
+    config.enable_system_ops = config.enable_system_ops or args.enable_system_ops
+    config.enable_clipboard = config.enable_clipboard or args.enable_clipboard
+    config.allow_process_terminate = config.allow_process_terminate or args.allow_process_terminate
+    config.system_service_allowlist.extend(args.allow_service)
+    config.system_task_allowlist.extend(args.allow_task)
     config.file_root = args.file_root or config.file_root
     control = _control_service(config)
     while True:

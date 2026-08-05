@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..mux import MuxStream, describe_exception
 from . import execute
+from . import system
+from . import clipboard
 from .actions import Action, ActionError, parse_action, scale_action
 from .framing import MessageReader, encode_message
+from .shell import PersistentShell
 
 LOG = logging.getLogger(__name__)
 
@@ -53,10 +57,19 @@ class ControlService:
     """
 
     def __init__(self, backend: ControlBackend, *, allow_exec: bool = False,
-                 files: Any = None) -> None:
+                 files: Any = None, system_enabled: bool = False,
+                 allow_process_terminate: bool = False,
+                 service_allowlist: list[str] | None = None,
+                 task_allowlist: list[str] | None = None,
+                 clipboard_enabled: bool = False) -> None:
         self.backend = backend
         self.allow_exec = allow_exec
         self.files = files
+        self.system_enabled = system_enabled
+        self.allow_process_terminate = allow_process_terminate
+        self.service_allowlist = {value.casefold() for value in (service_allowlist or [])}
+        self.task_allowlist = {value.casefold() for value in (task_allowlist or [])}
+        self.clipboard_enabled = clipboard_enabled
         self._delivered: tuple[int, int] | None = None
 
     async def handle(self, stream: MuxStream) -> None:
@@ -65,6 +78,9 @@ class ControlService:
             if message is None:
                 return
             header, body = message
+            if header.get("op") == "shell_open":
+                await self._handle_shell(stream, header.get("params") or {})
+                return
             try:
                 response, payload = await self._dispatch(header, body)
             except ActionError as exc:
@@ -79,6 +95,72 @@ class ControlService:
         finally:
             await stream.close()
 
+    async def _handle_shell(self, stream: MuxStream, params: dict[str, Any]) -> None:
+        if not self.allow_exec:
+            await stream.write(encode_message({"ok": False, "error": "command execution is disabled"}))
+            await stream.write_eof()
+            return
+        if not isinstance(params, dict):
+            await stream.write(encode_message({"ok": False, "error": "params must be an object"}))
+            await stream.write_eof()
+            return
+        shell = PersistentShell(params.get("program", "powershell"), params.get("cwd"))
+        await stream.write(encode_message({"ok": True, "kind": "ready"}))
+        reader = MessageReader(stream)
+        read_task = asyncio.create_task(reader.read_message())
+        run_task: asyncio.Task[int | None] | None = None
+
+        async def output(text: str) -> None:
+            await stream.write(encode_message({"ok": True, "kind": "stdout"}, text.encode("utf-8")))
+
+        try:
+            while True:
+                watched: set[asyncio.Task[Any]] = {read_task}
+                if run_task is not None:
+                    watched.add(run_task)
+                done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+                if run_task is not None and run_task in done:
+                    try:
+                        code = run_task.result()
+                        await stream.write(encode_message({"ok": True, "kind": "result",
+                                                           "exit_code": code}))
+                    except Exception as exc:
+                        await stream.write(encode_message({"ok": False, "kind": "error",
+                                                           "error": describe_exception(exc)}))
+                    run_task = None
+                if read_task in done:
+                    message = read_task.result()
+                    if message is None:
+                        break
+                    header, _body = message
+                    read_task = asyncio.create_task(reader.read_message())
+                    op = header.get("op")
+                    if op == "input":
+                        if run_task is not None:
+                            await stream.write(encode_message({"ok": False, "kind": "error",
+                                                               "error": "shell is busy"}))
+                            continue
+                        command = (header.get("params") or {}).get("command")
+                        if not isinstance(command, str):
+                            await stream.write(encode_message({"ok": False, "kind": "error",
+                                                               "error": "command must be a string"}))
+                            continue
+                        run_task = asyncio.create_task(shell.run(command, output))
+                    elif op == "interrupt":
+                        await shell.interrupt()
+                    elif op == "close":
+                        break
+                    else:
+                        await stream.write(encode_message({"ok": False, "kind": "error",
+                                                           "error": "unknown shell operation"}))
+        finally:
+            read_task.cancel()
+            if run_task is not None:
+                run_task.cancel()
+            await asyncio.gather(read_task, *( [run_task] if run_task else [] ),
+                                 return_exceptions=True)
+            await shell.close()
+
     async def _dispatch(self, header: dict[str, Any], body: bytes) -> tuple[dict[str, Any], bytes]:
         op = header.get("op")
         params = header.get("params") or {}
@@ -92,11 +174,48 @@ class ControlService:
             if not self.allow_exec:
                 raise ActionError("command execution is disabled")
             return {"ok": True, "result": await execute.run(params)}, b""
+        if op.startswith("system_"):
+            if not self.system_enabled:
+                raise ActionError("system operations are disabled")
+            return {"ok": True, "result": await self._system(op, params)}, b""
+        if op == "clipboard_read":
+            if not self.clipboard_enabled:
+                raise ActionError("clipboard control is disabled")
+            return {"ok": True, "result": await clipboard.read_text()}, b""
+        if op == "clipboard_write":
+            if not self.clipboard_enabled:
+                raise ActionError("clipboard control is disabled")
+            return {"ok": True, "result": await clipboard.write_text(params.get("text"))}, b""
         if op in ("read_file", "write_file", "list_dir"):
             if self.files is None:
                 raise ActionError("file transfer is disabled")
             return self._files(op, params, body)
         raise ActionError(f"unknown op {op!r}")
+
+    async def _system(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+        if op == "system_process_list":
+            return await system.process_list()
+        if op == "system_process_terminate":
+            if not self.allow_process_terminate:
+                raise ActionError("process termination is disabled")
+            return await system.process_terminate(params.get("pid"))
+        if op == "system_service_list":
+            return await system.service_list(params.get("name"))
+        if op == "system_service_control":
+            name = params.get("name")
+            if not isinstance(name, str) or name.casefold() not in self.service_allowlist:
+                raise ActionError("service is not in the allowlist")
+            return await system.service_control(params.get("action"), params.get("name"))
+        if op == "system_task_list":
+            return await system.task_list(params.get("name"))
+        if op == "system_task_run":
+            name = params.get("name")
+            if not isinstance(name, str) or name.casefold() not in self.task_allowlist:
+                raise ActionError("task is not in the allowlist")
+            return await system.task_run(params.get("name"))
+        if op == "system_diagnostics":
+            return await system.diagnostics()
+        raise ActionError(f"unknown system operation {op!r}")
 
     def _files(self, op: str, params: dict[str, Any], body: bytes) -> tuple[dict[str, Any], bytes]:
         if op == "read_file":

@@ -77,6 +77,8 @@ class ClientConfig:
     # The token guards it, since any local process can reach a loopback listener.
     control_listen: Endpoint | None = None
     control_token: str = ""
+    control_system_ops: bool = False
+    control_clipboard: bool = False
     max_streams: int = 128
     connect_timeout: float = 15.0
     idle_timeout: float = 0.0
@@ -110,6 +112,11 @@ class AgentConfig:
     enable_control: bool = False
     enable_exec: bool = False
     enable_file_transfer: bool = False
+    enable_system_ops: bool = False
+    enable_clipboard: bool = False
+    allow_process_terminate: bool = False
+    system_service_allowlist: list[str] = field(default_factory=list)
+    system_task_allowlist: list[str] = field(default_factory=list)
     file_root: str = ""
     max_streams: int = 128
     connect_timeout: float = 15.0
@@ -198,6 +205,8 @@ def load_client_config(path: str | Path | None) -> ClientConfig:
         if not isinstance(token, str):
             raise ConfigError("control.token must be a string")
         cfg.control_token = token
+        cfg.control_system_ops = _boolean(control, "system_ops", cfg.control_system_ops)
+        cfg.control_clipboard = _boolean(control, "clipboard", cfg.control_clipboard)
     elif control is not None:
         raise ConfigError("control must be an object")
     limits = raw.get("limits", {})
@@ -253,6 +262,17 @@ def load_agent_config(path: str | Path | None) -> AgentConfig:
     cfg.enable_control = _boolean(raw, "enable_control", cfg.enable_control)
     cfg.enable_exec = _boolean(raw, "enable_exec", cfg.enable_exec)
     cfg.enable_file_transfer = _boolean(raw, "enable_file_transfer", cfg.enable_file_transfer)
+    cfg.enable_system_ops = _boolean(raw, "enable_system_ops", cfg.enable_system_ops)
+    cfg.enable_clipboard = _boolean(raw, "enable_clipboard", cfg.enable_clipboard)
+    cfg.allow_process_terminate = _boolean(raw, "allow_process_terminate", cfg.allow_process_terminate)
+    for key, target in (("system_service_allowlist", cfg.system_service_allowlist),
+                        ("system_task_allowlist", cfg.system_task_allowlist)):
+        if key in raw:
+            values = raw[key]
+            if (not isinstance(values, list)
+                    or not all(isinstance(value, str) and value.strip() for value in values)):
+                raise ConfigError(f"{key} must be an array of non-empty strings")
+            target.extend(value.strip() for value in values)
     file_root = raw.get("file_root", cfg.file_root)
     if not isinstance(file_root, str):
         raise ConfigError("file_root must be a string")

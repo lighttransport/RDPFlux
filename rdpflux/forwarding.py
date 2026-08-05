@@ -190,7 +190,11 @@ class ClientForwarder:
         from .control.http import ControlHTTPServer
 
         listen = self.config.control_listen
-        server = ControlHTTPServer(ControlClient(self.peer), token=self.config.control_token)
+        server = ControlHTTPServer(
+            ControlClient(self.peer), token=self.config.control_token,
+            system_enabled=self.config.control_system_ops,
+            clipboard_enabled=self.config.control_clipboard,
+        )
         self.control_http = server
         self.servers.append(await server.start(listen.host, listen.port))
         LOG.info("desktop control REST API on %s (token %s)", listen,

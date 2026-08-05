@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -8,6 +9,7 @@ from rdpflux.control.actions import Action, ActionError, parse_action, scale_act
 from rdpflux.control.client import ControlClient, ControlError
 from rdpflux.control.framing import FramingError, MessageReader, encode_message
 from rdpflux.control.service import ControlService, Screenshot
+from rdpflux.control import system
 from rdpflux.forwarding import AgentForwarder
 from rdpflux.mux import MuxPeer
 from rdpflux.transport import MemoryTransport
@@ -51,8 +53,15 @@ async def connect(config: AgentConfig | None = None, backend: FakeBackend | None
         raise ValueError("client accepts no streams in this test")
 
     client_peer.set_handlers(on_open=reject)
-    agent = AgentForwarder(agent_peer, config or AgentConfig(enable_control=True),
-                           ControlService(backend))
+    actual_config = config or AgentConfig(enable_control=True)
+    agent = AgentForwarder(
+        agent_peer, actual_config,
+        ControlService(backend, allow_exec=actual_config.enable_exec,
+                       system_enabled=actual_config.enable_system_ops,
+                       allow_process_terminate=actual_config.allow_process_terminate,
+                       service_allowlist=actual_config.system_service_allowlist,
+                       task_allowlist=actual_config.system_task_allowlist),
+    )
     await asyncio.gather(agent.start(), client_peer.start())
     await client_peer.wait_ready()
     return ControlClient(client_peer), agent, backend
@@ -193,6 +202,63 @@ async def test_unknown_op_is_rejected():
     try:
         with pytest.raises(ControlError, match="unknown op"):
             await client.request("teleport")
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_system_operation_is_opt_in_and_round_trips():
+    client, agent, _ = await connect(AgentConfig(enable_control=True, enable_system_ops=True))
+    try:
+        async def fake_process_list():
+            return {"processes": [{"Id": 42, "ProcessName": "demo"}]}
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(system, "process_list", fake_process_list)
+            result = await client.system("process_list")
+        assert result["processes"][0]["Id"] == 42
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="uses POSIX bash for the protocol test")
+async def test_persistent_shell_streams_output_and_preserves_state():
+    config = AgentConfig(enable_control=True, enable_exec=True)
+    client, agent, _ = await connect(config)
+    session = await client.open_shell(program="bash")
+    chunks: list[str] = []
+    try:
+        assert await session.run("printf first; X=second", chunks.append) == 0
+        assert await session.run("printf $X", chunks.append) == 0
+        assert "first" in "".join(chunks)
+        assert "second" in "".join(chunks)
+    finally:
+        await session.close()
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_persistent_shell_is_disabled_by_default():
+    client, agent, _ = await connect(AgentConfig(enable_control=True))
+    try:
+        with pytest.raises(ControlError, match="disabled"):
+            await client.open_shell(program="bash")
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_system_mutations_require_their_specific_allowlist():
+    config = AgentConfig(enable_control=True, enable_system_ops=True)
+    client, agent, _ = await connect(config)
+    try:
+        with pytest.raises(ControlError, match="process termination is disabled"):
+            await client.system("process_terminate", pid=42)
+        with pytest.raises(ControlError, match="service is not in the allowlist"):
+            await client.system("service_control", action="restart", name="Spooler")
+        with pytest.raises(ControlError, match="task is not in the allowlist"):
+            await client.system("task_run", name="Demo")
     finally:
         await agent.close()
 
