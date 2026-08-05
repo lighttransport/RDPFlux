@@ -4,7 +4,7 @@ import json
 import pytest
 
 from rdpflux.control.client import ControlClient
-from rdpflux.control.http import ControlHTTPServer
+from rdpflux.control.http import ControlHTTPServer, _read_request
 from rdpflux.control.openapi import build_spec
 from rdpflux.control.service import ControlService
 from rdpflux.control import system
@@ -206,3 +206,12 @@ def test_openapi_spec_gates_optional_ops():
     variants = full["paths"]["/v1/action"]["post"]["requestBody"]["content"]["application/json"]["schema"]["oneOf"]
     names = {v["properties"]["action"]["const"] for v in variants}
     assert {"left_click", "type", "scroll", "screenshot"} <= names
+
+
+@pytest.mark.asyncio
+async def test_header_overrun_is_handled_without_server_crash():
+    class OverrunReader:
+        async def readuntil(self, separator):
+            raise asyncio.LimitOverrunError("header too large", consumed=0)
+
+    assert await _read_request(OverrunReader()) is None

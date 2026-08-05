@@ -237,7 +237,7 @@ def _json_body(body: bytes) -> dict[str, Any]:
 async def _read_request(reader: asyncio.StreamReader):
     try:
         head = await reader.readuntil(b"\r\n\r\n")
-    except (asyncio.IncompleteReadError, asyncio.LimitOverflowError):
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
         return None
     if len(head) > MAX_HEADERS:
         raise _HTTPError(413, "request headers too large")
