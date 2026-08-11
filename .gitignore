@@ -4,6 +4,15 @@
 priv/
 scratch/
 
+# Ignore stray root-level dotfiles (e.g. leftover scratch/editor files);
+# keep tracked dotfiles/dirs that the project actually depends on.
+/.*
+!/.gitignore
+!/.gitleaks.toml
+!/.trufflehog-exclude.txt
+!/.github/
+!/.githooks/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
