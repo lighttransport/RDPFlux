@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+is_windows=0
 case "$(uname -s 2>/dev/null || echo unknown)" in
   MINGW*|MSYS*|CYGWIN*)
-    echo "[pre-push] Windows detected; secret audit is temporarily disabled."
-    exit 0
+    is_windows=1
     ;;
 esac
 
@@ -20,7 +20,11 @@ fi
 cd "$repo_root"
 
 GITLEAKS_BIN="${GITLEAKS_BIN:-gitleaks}"
-TRUFFLEHOG_BIN="${TRUFFLEHOG_BIN:-${HOME}/local/bin/trufflehog}"
+if [[ "$is_windows" == "1" ]]; then
+  TRUFFLEHOG_BIN="${TRUFFLEHOG_BIN:-${HOME}/local/bin/trufflehog.exe}"
+else
+  TRUFFLEHOG_BIN="${TRUFFLEHOG_BIN:-${HOME}/local/bin/trufflehog}"
+fi
 
 if ! command -v "$GITLEAKS_BIN" >/dev/null 2>&1; then
   echo "[pre-push] gitleaks not found: ${GITLEAKS_BIN}" >&2
@@ -30,7 +34,7 @@ fi
 
 if [ ! -x "$TRUFFLEHOG_BIN" ]; then
   echo "[pre-push] trufflehog not executable: ${TRUFFLEHOG_BIN}" >&2
-  echo "[pre-push] Install trufflehog at ${HOME}/local/bin/trufflehog or set TRUFFLEHOG_BIN." >&2
+  echo "[pre-push] Install trufflehog there or set TRUFFLEHOG_BIN." >&2
   exit 1
 fi
 
@@ -41,7 +45,8 @@ if ! "$GITLEAKS_BIN" detect --source . --no-git --no-banner --redact --log-level
 fi
 
 echo "[pre-push] Running trufflehog..."
-if ! "$TRUFFLEHOG_BIN" filesystem --fail --no-update --no-verification --directory .; then
+if ! "$TRUFFLEHOG_BIN" filesystem --fail --no-update --no-verification \
+    --exclude-paths .trufflehog-exclude.txt --directory .; then
   echo "[pre-push] trufflehog detected issues. Push blocked." >&2
   exit 1
 fi
