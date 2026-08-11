@@ -156,6 +156,11 @@ class ClientForwarder:
         await self.peer.start()
         await self.peer.wait_ready()
         for rule in [*self.config.local_forwards, *self.config.sync_forwards]:
+            if rule.kind == "control":
+                if self.config.control_listen is not None or self.control_http is not None:
+                    raise ValueError("desktop control listener configured more than once")
+                await self._start_control(rule.listen)
+                continue
             server = await asyncio.start_server(
                 lambda r, w, item=rule: self._accept(self._handle_local(r, w, item), w),
                 rule.listen.host, rule.listen.port,
@@ -183,13 +188,12 @@ class ClientForwarder:
             await self.peer.request_listener({"kind": "reverse", "rule_id": rule_id, "listen": str(rule.listen)})
             LOG.info("reverse forward %s -> client %s", rule.listen, rule.target)
         if self.config.control_listen is not None:
-            await self._start_control()
+            await self._start_control(self.config.control_listen)
 
-    async def _start_control(self) -> None:
+    async def _start_control(self, listen: Endpoint) -> None:
         from .control.client import ControlClient
         from .control.http import ControlHTTPServer
 
-        listen = self.config.control_listen
         server = ControlHTTPServer(
             ControlClient(self.peer), token=self.config.control_token,
             exec_enabled=self.config.enable_exec,
@@ -204,6 +208,8 @@ class ClientForwarder:
 
     async def _handle_local(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rule: ForwardRule) -> None:
         try:
+            if rule.target is None:
+                raise ValueError("local control forwarding must be handled by the control HTTP server")
             stream = await self.peer.open_stream({"kind": "tcp", "host": rule.target.host, "port": rule.target.port}, self.config.connect_timeout)
             await bridge_socket(reader, writer, stream, self.config.idle_timeout)
         except Exception as exc:
@@ -216,6 +222,8 @@ class ClientForwarder:
                             rule: ForwardRule) -> None:
         target_writer: asyncio.StreamWriter | None = None
         try:
+            if rule.target is None:
+                raise ValueError("control is not valid for proxy forwarding")
             target_reader, target_writer = await asyncio.wait_for(
                 asyncio.open_connection(rule.target.host, rule.target.port),
                 self.config.connect_timeout,
@@ -300,6 +308,8 @@ class ClientForwarder:
         if not isinstance(rule_id, str) or rule_id not in self.reverse_rules:
             raise ValueError("unknown reverse rule")
         target = self.reverse_rules[rule_id].target
+        if target is None:
+            raise ValueError("reverse control forwarding is not supported")
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(target.host, target.port), self.config.connect_timeout,
         )

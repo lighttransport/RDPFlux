@@ -91,6 +91,19 @@ def test_control_capabilities_are_loaded_and_validated(tmp_path):
     assert cfg.control_system_ops is True
     assert cfg.control_clipboard is True
 
+    client.write_text(
+        '{"local_forwards":[{"listen":"127.0.0.1:18080", "target":"control"}]}',
+        encoding="utf-8")
+    cfg = load_client_config(client)
+    assert cfg.local_forwards[0].kind == "control"
+    assert cfg.local_forwards[0].target is None
+
+    client.write_text(
+        '{"reverse_forwards":[{"listen":"127.0.0.1:18080", "target":"control"}]}',
+        encoding="utf-8")
+    with pytest.raises(ConfigError, match="only valid for local_forwards"):
+        load_client_config(client)
+
     agent = tmp_path / "agent.json"
     agent.write_text(
         '{"enable_system_ops":true,"enable_clipboard":true,'

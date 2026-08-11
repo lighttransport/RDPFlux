@@ -61,8 +61,9 @@ def parse_endpoint(value: str, *, default_host: str | None = None) -> Endpoint:
 @dataclass(slots=True, frozen=True)
 class ForwardRule:
     listen: Endpoint
-    target: Endpoint
+    target: Endpoint | None
     name: str = ""
+    kind: str = "tcp"
 
 
 @dataclass(slots=True, frozen=True)
@@ -156,7 +157,14 @@ def _rule(value: Any, label: str) -> ForwardRule:
     name = value.get("name", "")
     if not isinstance(name, str):
         raise ConfigError(f"{label} entry names must be strings")
-    return ForwardRule(parse_endpoint(value["listen"]), parse_endpoint(value["target"]), name)
+    target = value["target"]
+    if target == "control":
+        if label != "local_forwards":
+            raise ConfigError(f"{label} target 'control' is only valid for local_forwards")
+        return ForwardRule(parse_endpoint(value["listen"]), None, name, "control")
+    if not isinstance(target, str):
+        raise ConfigError(f"{label} entries require string listen and target fields")
+    return ForwardRule(parse_endpoint(value["listen"]), parse_endpoint(target), name)
 
 
 def _array(raw: dict[str, Any], name: str) -> list[Any]:

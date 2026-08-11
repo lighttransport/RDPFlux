@@ -311,6 +311,21 @@ The client exposes a loopback REST API and OpenAPI spec. Add a `control` block t
 }
 ```
 
+The control API can also be exposed through a normal local-forward entry, which
+is useful when keeping all listeners together in one forwarding section:
+
+```json
+{
+  "local_forwards": [
+    { "listen": "127.0.0.1:18080", "target": "control" }
+  ],
+  "control": { "token": "a-long-random-string" }
+}
+```
+
+`target: "control"` is a client-side REST listener backed by the existing
+`kind: "control"` mux stream; it is not a TCP destination on the agent.
+
 Then, from the client machine:
 
 ```text

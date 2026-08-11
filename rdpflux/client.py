@@ -26,7 +26,10 @@ def _forward(value: str) -> ForwardRule:
         raise argparse.ArgumentTypeError("forward must be LISTEN=TARGET")
     listen, target = value.split("=", 1)
     try:
-        return ForwardRule(parse_endpoint(listen, default_host="127.0.0.1"), parse_endpoint(target))
+        listen_endpoint = parse_endpoint(listen, default_host="127.0.0.1")
+        if target.strip() == "control":
+            return ForwardRule(listen_endpoint, None, kind="control")
+        return ForwardRule(listen_endpoint, parse_endpoint(target))
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
