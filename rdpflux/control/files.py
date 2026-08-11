@@ -10,6 +10,7 @@ from .actions import ActionError
 
 DEFAULT_MAX_UPLOAD = 128 * 1024 * 1024
 MAX_ENTRIES = 5000
+MAX_SCAN_ENTRIES = 20_000
 FILE_MODES = frozenset(("read", "write", "read_write"))
 
 
@@ -155,12 +156,26 @@ class FileStore:
         return {"path": str(target), "size": len(data)}
 
     def list(self, path: str = ".") -> dict[str, Any]:
+        """List a directory's entries, gated by the file access policy.
+
+        Raw entries are scanned up to MAX_SCAN_ENTRIES before sorting, so a
+        pathologically large directory cannot force an unbounded in-memory
+        sort; entries beyond that scan bound are dropped from consideration
+        (not just from the output) and 'truncated' is set regardless.
+        """
         root, target = self._resolve(path)
         self._check_access(root, target, "read", path)
         if not target.is_dir():
             raise ActionError(f"not a directory: {path}")
+        scanned: list[Any] = []
+        overflowed = False
+        for child in target.iterdir():
+            if len(scanned) >= MAX_SCAN_ENTRIES:
+                overflowed = True
+                break
+            scanned.append(child)
         entries = []
-        for child in sorted(target.iterdir(), key=lambda item: item.name):
+        for child in sorted(scanned, key=lambda item: item.name):
             if len(entries) >= MAX_ENTRIES:
                 break
             try:
@@ -180,4 +195,4 @@ class FileStore:
             except OSError:
                 continue  # vanished or unreadable between iterdir and stat
         return {"path": str(target), "entries": entries,
-                "truncated": len(entries) >= MAX_ENTRIES}
+                "truncated": len(entries) >= MAX_ENTRIES or overflowed}

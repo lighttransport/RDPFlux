@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,6 +17,7 @@ MAX_REQUEST_BODY = 128 * 1024 * 1024
 MAX_HEADERS = 64 * 1024
 _STATUS = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
            404: "Not Found", 405: "Method Not Allowed", 413: "Payload Too Large",
+           429: "Too Many Requests",
            500: "Internal Server Error", 502: "Bad Gateway"}
 
 
@@ -29,13 +31,17 @@ class ControlHTTPServer:
 
     def __init__(self, control: ControlClient, *, token: str,
                  exec_enabled: bool = False, files_enabled: bool = False,
-                 system_enabled: bool = False, clipboard_enabled: bool = False) -> None:
+                 system_enabled: bool = False, clipboard_enabled: bool = False,
+                 max_sessions: int = 8, session_idle_timeout: float = 1800.0) -> None:
         self.control = control
         self.token = token
         self._spec = build_spec(exec_enabled=exec_enabled, files_enabled=files_enabled,
                                 system_enabled=system_enabled, clipboard_enabled=clipboard_enabled)
         self._server: asyncio.AbstractServer | None = None
         self._shells: dict[str, Any] = {}
+        self._shell_touched: dict[str, float] = {}
+        self.max_sessions = max_sessions
+        self.session_idle_timeout = session_idle_timeout
 
     async def start(self, host: str, port: int) -> asyncio.AbstractServer:
         self._server = await asyncio.start_server(self._handle, host, port)
@@ -49,6 +55,7 @@ class ControlHTTPServer:
         await asyncio.gather(*(shell.close() for shell in self._shells.values()),
                              return_exceptions=True)
         self._shells.clear()
+        self._shell_touched.clear()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -118,7 +125,22 @@ class ControlHTTPServer:
             return await self._file(method, query, body)
         raise _HTTPError(404, f"no route for {method} {route}")
 
+    async def _reap_idle_sessions(self) -> None:
+        if self.session_idle_timeout <= 0:
+            return
+        now = time.monotonic()
+        stale = [session_id for session_id, touched in self._shell_touched.items()
+                 if now - touched > self.session_idle_timeout]
+        for session_id in stale:
+            shell = self._shells.pop(session_id, None)
+            self._shell_touched.pop(session_id, None)
+            if shell is not None:
+                await shell.close()
+
     async def _session_open(self, params: dict[str, Any]) -> tuple[int, str, bytes]:
+        await self._reap_idle_sessions()
+        if len(self._shells) >= self.max_sessions:
+            raise _HTTPError(429, f"too many concurrent sessions (max {self.max_sessions})")
         try:
             shell = await self.control.open_shell(
                 program=params.get("program", "powershell"), cwd=params.get("cwd"))
@@ -126,6 +148,7 @@ class ControlHTTPServer:
             raise _HTTPError(502, str(exc)) from exc
         session_id = secrets.token_urlsafe(18)
         self._shells[session_id] = shell
+        self._shell_touched[session_id] = time.monotonic()
         return 200, "application/json", _dumps({"session": session_id})
 
     async def _session_route(self, method: str, route: str, body: bytes) -> tuple[int, str, bytes]:
@@ -146,13 +169,16 @@ class ControlHTTPServer:
                 code = await session.run(command, chunks.append)
             except ControlError as exc:
                 raise _HTTPError(502, str(exc)) from exc
+            self._shell_touched[parts[3]] = time.monotonic()
             return 200, "application/json", _dumps({"exit_code": code, "stdout": "".join(chunks)})
         if method == "POST" and operation == "interrupt":
             await session.interrupt()
+            self._shell_touched[parts[3]] = time.monotonic()
             return 200, "application/json", _dumps({"interrupted": True})
         if method == "DELETE" and operation == "close":
             await session.close()
             self._shells.pop(parts[3], None)
+            self._shell_touched.pop(parts[3], None)
             return 200, "application/json", _dumps({"closed": True})
         raise _HTTPError(405, f"{method} not allowed on session")
 

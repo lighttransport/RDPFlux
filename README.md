@@ -334,7 +334,11 @@ display, so the model never handles two coordinate systems.
 Enable the persistent shell with `--enable-exec`. The control mux supports a
 long-lived PowerShell session (or Bash/WSL when explicitly selected) with
 incremental output, interruption, and cleanup. The REST API exposes session
-creation and command execution under `/v1/sessions`.
+creation and command execution under `/v1/sessions`. Concurrent sessions are
+capped (`control.max_sessions`, default 8) and idle sessions are closed
+automatically (`control.session_idle_timeout`, default 1800 seconds; 0
+disables reaping) to bound how many shell subprocesses a client can leave
+running.
 
 Typed process, service, task, and diagnostic operations require a separate
 agent opt-in:
@@ -419,7 +423,9 @@ falls back to PNG.
   explicit allowlists.
 - Clipboard access requires `--enable-clipboard` and is limited to text.
 - The client REST listener binds loopback and requires a bearer token — any local
-  process can otherwise reach a loopback port.
+  process can otherwise reach a loopback port. RDPFlux refuses to start if
+  `control.listen` is set without a token of at least 16 characters; set
+  `control.allow_no_token: true` to explicitly opt out for local development.
 - Windows limits apply: input from a non-elevated agent cannot drive elevated
   windows or the UAC secure desktop, and capture returns black if the RDP session
   is disconnected, so mstsc must stay connected.

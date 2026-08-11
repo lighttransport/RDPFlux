@@ -1,5 +1,9 @@
 .agents/
 
+# Private/scratch working files that should never be committed
+priv/
+scratch/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
