@@ -40,6 +40,27 @@ class _ConfigReloader:
         return self._config
 
 
+class _PrimaryPluginLease:
+    """Allow only the first mstsc plugin instance to activate rdpflux."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owner = None
+
+    def claim(self, owner) -> bool:
+        with self._lock:
+            if self._owner is None:
+                self._owner = owner
+            return self._owner is owner
+
+    def release(self, owner) -> bool:
+        with self._lock:
+            if self._owner is not owner:
+                return False
+            self._owner = None
+            return True
+
+
 class _ChannelRuntime:
     def __init__(self, channel, config: ClientConfig) -> None:
         self.channel = channel
@@ -177,6 +198,7 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
 
     shutdown = threading.Event()
     reloader = _ConfigReloader(config, config_factory)
+    primary_lease = _PrimaryPluginLease()
 
     def hr_value(value) -> int:
         return int(getattr(value, "value", value if value is not None else E_FAIL))
@@ -202,15 +224,25 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
             self.channel = None
             self.channel_ref = False
             self.runtime: _ChannelRuntime | None = None
+            self.primary = False
 
         def Initialize(self, manager: IWTSVirtualChannelManager) -> int:
+            self.primary = primary_lease.claim(self)
+            if not self.primary:
+                LOG.info("secondary mstsc instance detected; rdpflux is disabled for this instance")
+                return hr_value(S_OK)
             try:
                 listener = IWTSListener()
                 result = manager.CreateListener(CHANNEL_NAME, 0, self, byref(listener))
                 if hr_value(result) == 0:
                     self.listener = listener
+                else:
+                    primary_lease.release(self)
+                    self.primary = False
                 return hr_value(result)
             except Exception:
+                primary_lease.release(self)
+                self.primary = False
                 LOG.exception("IWTSPlugin.Initialize failed")
                 return hr_value(E_FAIL)
 
@@ -223,13 +255,16 @@ def run_com_server(config: ClientConfig, *, smoke_test: bool = False, config_fac
 
         def Terminated(self) -> int:
             self._close_channel()
-            shutdown.set()
+            if self.primary:
+                primary_lease.release(self)
+                self.primary = False
+                shutdown.set()
             return hr_value(S_OK)
 
         def OnNewChannelConnection(self, channel, _data, accept, callback) -> int:
             accept[0] = False
             callback[0] = None
-            if not channel:
+            if not self.primary or not channel:
                 return hr_value(E_FAIL)
             try:
                 self._close_channel()
