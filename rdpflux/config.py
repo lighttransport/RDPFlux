@@ -10,6 +10,7 @@ from typing import Any
 from .control.files import FileRule
 
 DEFAULT_MAX_FILE_UPLOAD = 128 * 1024 * 1024
+MIN_CONTROL_TOKEN_LENGTH = 16
 
 
 class ConfigError(ValueError):
@@ -90,8 +91,13 @@ class ClientConfig:
     # The token guards it, since any local process can reach a loopback listener.
     control_listen: Endpoint | None = None
     control_token: str = ""
+    allow_no_token: bool = False
+    enable_exec: bool = False
+    enable_file_transfer: bool = False
     control_system_ops: bool = False
     control_clipboard: bool = False
+    control_max_sessions: int = 8
+    control_session_idle_timeout: float = 1800.0
     max_streams: int = 128
     connect_timeout: float = 15.0
     idle_timeout: float = 0.0
@@ -229,8 +235,25 @@ def load_client_config(path: str | Path | None) -> ClientConfig:
         if not isinstance(token, str):
             raise ConfigError("control.token must be a string")
         cfg.control_token = token
+        cfg.allow_no_token = _boolean(control, "allow_no_token", cfg.allow_no_token)
+        cfg.enable_exec = _boolean(control, "exec", cfg.enable_exec)
+        cfg.enable_file_transfer = _boolean(control, "file_transfer", cfg.enable_file_transfer)
         cfg.control_system_ops = _boolean(control, "system_ops", cfg.control_system_ops)
         cfg.control_clipboard = _boolean(control, "clipboard", cfg.control_clipboard)
+        cfg.control_max_sessions = _integer(control.get("max_sessions", cfg.control_max_sessions),
+                                            "control.max_sessions", minimum=1, maximum=256)
+        cfg.control_session_idle_timeout = _number(
+            control.get("session_idle_timeout", cfg.control_session_idle_timeout),
+            "control.session_idle_timeout", minimum=0, allow_zero=True)
+        if cfg.control_listen is not None and not cfg.allow_no_token:
+            if len(cfg.control_token) < MIN_CONTROL_TOKEN_LENGTH:
+                raise ConfigError(
+                    "control.token must be set (at least "
+                    f"{MIN_CONTROL_TOKEN_LENGTH} characters) when control.listen "
+                    "is configured; the loopback control API is otherwise "
+                    "reachable by any local process. Set control.allow_no_token "
+                    "to true to explicitly opt out for local development."
+                )
     elif control is not None:
         raise ConfigError("control must be an object")
     limits = raw.get("limits", {})

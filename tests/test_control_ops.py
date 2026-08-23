@@ -38,6 +38,16 @@ def store_list(root):
     return FileStore(root).list()
 
 
+def test_file_store_list_bounds_scan_for_huge_directories(tmp_path, monkeypatch):
+    import rdpflux.control.files as files_module
+    monkeypatch.setattr(files_module, "MAX_SCAN_ENTRIES", 3)
+    for index in range(10):
+        (tmp_path / f"f{index}.txt").write_bytes(b"x")
+    listing = FileStore(tmp_path).list()
+    assert listing["truncated"] is True
+    assert len(listing["entries"]) <= 3
+
+
 @pytest.mark.parametrize("path", ["../escape.txt", "sub/../../escape.txt", "/etc/passwd",
                                   "C:/Windows/system32/x", "notes/../../outside"])
 def test_file_store_rejects_traversal(tmp_path, path):

@@ -6,7 +6,40 @@ import pytest
 
 from rdpflux.mux import describe_exception
 from rdpflux.config import ClientConfig
-from rdpflux.mstsc_plugin import _ChannelRuntime
+from rdpflux.mstsc_plugin import _ChannelRuntime, _PrimaryPluginLease
+
+
+def test_primary_plugin_lease_allows_only_first_instance():
+    lease = _PrimaryPluginLease()
+    first = object()
+    second = object()
+
+    assert lease.claim(first)
+    assert lease.claim(first), "claiming again must be idempotent for the owner"
+    assert not lease.claim(second)
+    assert not lease.release(second), "a secondary instance must not release the primary"
+    assert not lease.claim(second)
+    assert lease.release(first)
+    assert lease.claim(second), "a later instance can own a newly started plugin server"
+
+
+def test_primary_plugin_lease_has_one_winner_under_concurrency():
+    lease = _PrimaryPluginLease()
+    owners = [object() for _ in range(16)]
+    barrier = threading.Barrier(len(owners))
+    results = []
+
+    def claim(owner):
+        barrier.wait()
+        results.append((owner, lease.claim(owner)))
+
+    threads = [threading.Thread(target=claim, args=(owner,)) for owner in owners]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(won for _, won in results) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="mstsc COM is Windows-only")

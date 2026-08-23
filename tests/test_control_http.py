@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -37,7 +38,7 @@ async def raw_request(port, method, path, *, body=b"", token=None, ctype="applic
     return status, resp_headers, payload
 
 
-async def serve(token="secret", **service_kwargs):
+async def serve(token="secret", max_sessions=8, session_idle_timeout=1800.0, **service_kwargs):
     backend = FakeBackend()
     left, right = MemoryTransport.pair()
     client_peer = MuxPeer(left, role="client")
@@ -57,7 +58,9 @@ async def serve(token="secret", **service_kwargs):
                              exec_enabled=service_kwargs.get("allow_exec", False),
                              files_enabled=service_kwargs.get("files") is not None,
                              system_enabled=service_kwargs.get("system_enabled", False),
-                             clipboard_enabled=service_kwargs.get("clipboard_enabled", False))
+                             clipboard_enabled=service_kwargs.get("clipboard_enabled", False),
+                             max_sessions=max_sessions,
+                             session_idle_timeout=session_idle_timeout)
     server = await http.start("127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
 
@@ -206,6 +209,53 @@ def test_openapi_spec_gates_optional_ops():
     variants = full["paths"]["/v1/action"]["post"]["requestBody"]["content"]["application/json"]["schema"]["oneOf"]
     names = {v["properties"]["action"]["const"] for v in variants}
     assert {"left_click", "type", "scroll", "screenshot"} <= names
+
+
+def _shell_program() -> str:
+    return "powershell" if os.name == "nt" else "bash"
+
+
+@pytest.mark.asyncio
+async def test_session_open_is_capped():
+    port, _, close = await serve(allow_exec=True, max_sessions=2)
+    try:
+        body = json.dumps({"program": _shell_program()}).encode()
+        first = await raw_request(port, "POST", "/v1/sessions", body=body, token="secret")
+        second = await raw_request(port, "POST", "/v1/sessions", body=body, token="secret")
+        assert first[0] == 200 and second[0] == 200
+        third = await raw_request(port, "POST", "/v1/sessions", body=body, token="secret")
+        assert third[0] == 429
+
+        first_session = json.loads(first[2])["session"]
+        closed = await raw_request(port, "DELETE", f"/v1/sessions/{first_session}/close",
+                                   token="secret")
+        assert closed[0] == 200
+        fourth = await raw_request(port, "POST", "/v1/sessions", body=body, token="secret")
+        assert fourth[0] == 200
+    finally:
+        await close()
+
+
+@pytest.mark.asyncio
+async def test_idle_sessions_are_reaped_on_open():
+    port, _, close = await serve(allow_exec=True, max_sessions=1, session_idle_timeout=0.01)
+    try:
+        body = json.dumps({"program": _shell_program()}).encode()
+        first = await raw_request(port, "POST", "/v1/sessions", body=body, token="secret")
+        assert first[0] == 200
+        first_session = json.loads(first[2])["session"]
+
+        await asyncio.sleep(0.05)
+
+        second = await raw_request(port, "POST", "/v1/sessions", body=body, token="secret")
+        assert second[0] == 200
+
+        stale = await raw_request(port, "POST", f"/v1/sessions/{first_session}/run",
+                                  body=json.dumps({"command": "echo hi"}).encode(),
+                                  token="secret")
+        assert stale[0] == 404
+    finally:
+        await close()
 
 
 @pytest.mark.asyncio

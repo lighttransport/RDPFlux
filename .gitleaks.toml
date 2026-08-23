@@ -1,0 +1,17 @@
+title = "rdpflux secret-scan config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented placeholder control-API tokens (see AGENT.md); never real secrets"
+regexes = [
+  '''change-me-to-a-long-random-string''',
+  '''a-long-random-string''',
+]
+
+[[allowlists]]
+description = "Generated packaging metadata, not committed (see .gitignore)"
+paths = [
+  '''.*\.egg-info/.*''',
+]

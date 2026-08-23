@@ -1,0 +1,11 @@
+\.venv[\\/]
+(^|[\\/])venv[\\/]
+priv[\\/]
+scratch[\\/]
+__pycache__[\\/]
+\.pytest-tmp-
+\.testtmp-
+rdpflux\.egg-info[\\/]
+(^|[\\/])dist[\\/]
+(^|[\\/])build[\\/]
+\.git[\\/]

@@ -86,8 +86,11 @@ def test_proxy_forwards_are_loaded_separately(tmp_path):
 def test_control_capabilities_are_loaded_and_validated(tmp_path):
     client = tmp_path / "client.json"
     client.write_text(
-        '{"control":{"system_ops":true,"clipboard":true}}', encoding="utf-8")
+        '{"control":{"exec":true,"file_transfer":true,"system_ops":true,'
+        '"clipboard":true}}', encoding="utf-8")
     cfg = load_client_config(client)
+    assert cfg.enable_exec is True
+    assert cfg.enable_file_transfer is True
     assert cfg.control_system_ops is True
     assert cfg.control_clipboard is True
 
@@ -120,6 +123,38 @@ def test_control_capabilities_are_loaded_and_validated(tmp_path):
     agent.write_text('{"system_service_allowlist":"Spooler"}', encoding="utf-8")
     with pytest.raises(ConfigError, match="array"):
         load_agent_config(agent)
+
+
+def test_control_listener_without_token_is_rejected(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text('{"control":{"listen":"127.0.0.1:18080"}}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="token"):
+        load_client_config(client)
+
+
+def test_control_listener_with_short_token_is_rejected(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text(
+        '{"control":{"listen":"127.0.0.1:18080","token":"short"}}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="token"):
+        load_client_config(client)
+
+
+def test_control_allow_no_token_opts_out(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text(
+        '{"control":{"listen":"127.0.0.1:18080","allow_no_token":true}}', encoding="utf-8")
+    cfg = load_client_config(client)
+    assert cfg.control_token == ""
+    assert cfg.allow_no_token is True
+
+
+def test_control_token_without_listen_is_not_required(tmp_path):
+    client = tmp_path / "client.json"
+    client.write_text('{"control":{"exec":true}}', encoding="utf-8")
+    cfg = load_client_config(client)
+    assert cfg.control_listen is None
+    assert cfg.control_token == ""
 
 
 def test_file_access_policy_is_loaded(tmp_path):

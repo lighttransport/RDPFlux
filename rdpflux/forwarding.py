@@ -200,11 +200,13 @@ class ClientForwarder:
             files_enabled=self.config.enable_file_transfer,
             system_enabled=self.config.control_system_ops,
             clipboard_enabled=self.config.control_clipboard,
+            max_sessions=self.config.control_max_sessions,
+            session_idle_timeout=self.config.control_session_idle_timeout,
         )
         self.control_http = server
         self.servers.append(await server.start(listen.host, listen.port))
         LOG.info("desktop control REST API on %s (token %s)", listen,
-                 "required" if self.config.control_token else "DISABLED")
+                 "required" if self.config.control_token else "DISABLED (allow_no_token)")
 
     async def _handle_local(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, rule: ForwardRule) -> None:
         try:

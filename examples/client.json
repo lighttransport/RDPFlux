@@ -21,7 +21,9 @@
   "reverse_forwards": [],
   "control": {
     "listen": "127.0.0.1:18080",
-    "token": "change-me-to-a-long-random-string"
+    "token": "change-me-to-a-long-random-string",
+    "exec": true,
+    "file_transfer": true
   },
   "limits": {
     "max_streams": 128,
