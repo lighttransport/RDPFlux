@@ -281,3 +281,23 @@ async def test_screenshot_width_is_bounded():
             await client.screenshot(width=99999)
     finally:
         await agent.close()
+
+
+def test_encode_reports_size_and_hint_for_an_oversized_header():
+    from rdpflux.control.framing import ControlHeaderTooLarge
+    with pytest.raises(ControlHeaderTooLarge, match=r"exec request header is \d+ bytes, over the 65536-byte"):
+        encode_message({"op": "exec", "params": {"command": ["x" * 70000]}}, what="exec request header")
+
+
+@pytest.mark.asyncio
+async def test_reader_reports_an_oversized_incoming_header():
+    from rdpflux.control.framing import ControlHeaderTooLarge
+    with pytest.raises(ControlHeaderTooLarge, match="received control header"):
+        await MessageReader(_FakeStream(b"{" + b"x" * 70000)).read_message()
+
+
+def test_request_too_large_maps_to_http_413():
+    from rdpflux.control.client import ControlError, ControlRequestTooLarge
+    from rdpflux.control.http import _control_status
+    assert _control_status(ControlRequestTooLarge("too big")) == 413
+    assert _control_status(ControlError("agent failed")) == 502

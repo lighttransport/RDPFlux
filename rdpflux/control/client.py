@@ -4,11 +4,15 @@ import asyncio
 from typing import Any
 
 from ..mux import MuxPeer
-from .framing import FramingError, MessageReader, encode_message
+from .framing import ControlHeaderTooLarge, FramingError, MessageReader, encode_message
 
 
 class ControlError(Exception):
     """The agent rejected a control request."""
+
+
+class ControlRequestTooLarge(ControlError):
+    """The request cannot be framed: its JSON header exceeds the limit."""
 
 
 class ShellSession:
@@ -70,9 +74,13 @@ class ControlClient:
         self.timeout = timeout
 
     async def request(self, op: str, params: dict[str, Any] | None = None) -> tuple[dict[str, Any], bytes]:
+        try:
+            request = encode_message({"op": op, "params": params or {}}, what=f"{op} request header")
+        except ControlHeaderTooLarge as exc:
+            raise ControlRequestTooLarge(str(exc)) from exc
         stream = await self.peer.open_stream({"kind": "control"}, self.timeout)
         try:
-            await stream.write(encode_message({"op": op, "params": params or {}}))
+            await stream.write(request)
             await stream.write_eof()
             message = await MessageReader(stream).read_message()
             if message is None:

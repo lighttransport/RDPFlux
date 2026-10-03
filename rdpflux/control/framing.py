@@ -17,12 +17,27 @@ class FramingError(Exception):
     pass
 
 
-def encode_message(header: dict[str, Any], body: bytes = b"") -> bytes:
+class ControlHeaderTooLarge(FramingError):
+    """A control message's JSON header line is larger than MAX_HEADER.
+
+    Only the raw body may be large (up to MAX_BODY). Large data placed in the
+    JSON header, such as a long exec command line or exec output, must move
+    to the body: for files, use the file transfer operations (/v1/file).
+    """
+
+    def __init__(self, size: int, what: str = "control header") -> None:
+        self.size = size
+        super().__init__(
+            f"{what} is {size} bytes, over the {MAX_HEADER}-byte JSON header limit; "
+            "send large data as a message body instead (for files, use /v1/file)")
+
+
+def encode_message(header: dict[str, Any], body: bytes = b"", *, what: str = "control header") -> bytes:
     if body:
         header = {**header, "body_len": len(body)}
     line = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(line) > MAX_HEADER:
-        raise FramingError(f"control header exceeds {MAX_HEADER} bytes")
+        raise ControlHeaderTooLarge(len(line), what)
     return line + b"\n" + body
 
 
@@ -53,7 +68,7 @@ class MessageReader:
                 del self._buffer[:index + 1]
                 return line
             if len(self._buffer) > MAX_HEADER:
-                raise FramingError(f"control header exceeds {MAX_HEADER} bytes")
+                raise ControlHeaderTooLarge(len(self._buffer), "received control header (incomplete)")
             if not await self._fill():
                 if self._buffer:
                     raise FramingError("stream ended mid-header")

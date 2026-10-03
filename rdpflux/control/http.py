@@ -8,7 +8,7 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from .client import ControlClient, ControlError
+from .client import ControlClient, ControlError, ControlRequestTooLarge
 from .openapi import build_spec
 
 LOG = logging.getLogger(__name__)
@@ -145,7 +145,7 @@ class ControlHTTPServer:
             shell = await self.control.open_shell(
                 program=params.get("program", "powershell"), cwd=params.get("cwd"))
         except ControlError as exc:
-            raise _HTTPError(502, str(exc)) from exc
+            raise _HTTPError(_control_status(exc), str(exc)) from exc
         session_id = secrets.token_urlsafe(18)
         self._shells[session_id] = shell
         self._shell_touched[session_id] = time.monotonic()
@@ -195,7 +195,7 @@ class ControlHTTPServer:
         try:
             result, body = await self.control.request("screenshot", params)
         except ControlError as exc:
-            raise _HTTPError(502, str(exc)) from exc
+            raise _HTTPError(_control_status(exc), str(exc)) from exc
         ctype = "image/jpeg" if result.get("format") == "jpeg" else "image/png"
         return 200, ctype, body
 
@@ -203,7 +203,7 @@ class ControlHTTPServer:
         try:
             result, _ = await self.control.request(op, params)
         except ControlError as exc:
-            raise _HTTPError(502, str(exc)) from exc
+            raise _HTTPError(_control_status(exc), str(exc)) from exc
         return 200, "application/json", _dumps(result)
 
     async def _file(self, method: str, query: dict, body: bytes) -> tuple[int, str, bytes]:
@@ -219,8 +219,13 @@ class ControlHTTPServer:
                 result = await self.control.write_file(path, body, create_parents=create)
                 return 200, "application/json", _dumps(result)
         except ControlError as exc:
-            raise _HTTPError(502, str(exc)) from exc
+            raise _HTTPError(_control_status(exc), str(exc)) from exc
         raise _HTTPError(405, f"{method} not allowed on /v1/file")
+
+
+def _control_status(exc: ControlError) -> int:
+    """413 when the request itself cannot be framed; 502 for agent failures."""
+    return 413 if isinstance(exc, ControlRequestTooLarge) else 502
 
 
 class _HTTPError(Exception):

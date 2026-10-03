@@ -10,7 +10,7 @@ from . import execute
 from . import system
 from . import clipboard
 from .actions import Action, ActionError, parse_action, scale_action
-from .framing import MessageReader, encode_message
+from .framing import MAX_HEADER, ControlHeaderTooLarge, FramingError, MessageReader, encode_message
 from .shell import PersistentShell
 
 LOG = logging.getLogger(__name__)
@@ -74,7 +74,13 @@ class ControlService:
 
     async def handle(self, stream: MuxStream) -> None:
         try:
-            message = await MessageReader(stream).read_message()
+            try:
+                message = await MessageReader(stream).read_message()
+            except FramingError as exc:
+                # Tell the client why, instead of closing without a reply.
+                await stream.write(encode_message({"ok": False, "error": f"agent could not read the request: {exc}"}))
+                await stream.write_eof()
+                return
             if message is None:
                 return
             header, body = message
@@ -88,7 +94,7 @@ class ControlService:
             except Exception as exc:
                 LOG.exception("control request failed")
                 response, payload = {"ok": False, "error": describe_exception(exc)}, b""
-            await stream.write(encode_message(response, payload))
+            await stream.write(_encode_response(header.get("op"), response, payload))
             await stream.write_eof()
         except Exception as exc:
             LOG.warning("control stream failed: %s", describe_exception(exc))
@@ -279,3 +285,34 @@ class ControlService:
         # with the screenshot, so a resolution change is picked up immediately.
         native_width, native_height = self.backend.native_size()
         return native_width / delivered_width, native_height / delivered_height
+
+
+def _encode_response(op: Any, response: dict[str, Any], payload: bytes) -> bytes:
+    """Encode a reply, never letting an oversized JSON header drop the stream.
+
+    exec output travels inside the JSON header, so long output is cut to fit:
+    the tails of stdout/stderr are kept and 'truncated' is set. Any other
+    oversized reply becomes an explicit error.
+    """
+    try:
+        return encode_message(response, payload, what=f"{op} response header")
+    except ControlHeaderTooLarge as exc:
+        result = response.get("result")
+        if op == "exec" and isinstance(result, dict):
+            budget = MAX_HEADER // 2
+            while budget >= 256:
+                trimmed = dict(result)
+                for key in ("stdout", "stderr"):
+                    value = trimmed.get(key)
+                    if isinstance(value, str) and len(value) > budget // 2:
+                        trimmed[key] = value[-(budget // 2):]
+                trimmed["truncated"] = True
+                trimmed["truncated_reason"] = (
+                    f"output exceeded the {MAX_HEADER}-byte response header limit; only the last "
+                    "part is returned. Redirect output to a file and fetch it with /v1/file.")
+                try:
+                    return encode_message({**response, "result": trimmed}, payload,
+                                          what=f"{op} response header")
+                except ControlHeaderTooLarge:
+                    budget //= 2
+        return encode_message({"ok": False, "error": str(exc)})

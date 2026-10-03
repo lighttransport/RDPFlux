@@ -503,6 +503,26 @@ Multiple roots can be exposed with names. Requests then use the explicit
 Use `temp:/tests/sample.txt` or `reports:/2026/summary.txt` as the API path.
 `file_roots` takes precedence over the legacy singular `file_root` setting.
 
+### Message size limits
+
+Each control request and reply is one JSON header line followed by an
+optional raw body. The JSON header is limited to 64 KiB; the body (file
+contents, screenshots) may be up to 128 MiB and is streamed in 16 KiB mux
+chunks. Anything large therefore belongs in a body, not in JSON:
+
+- Transfer files with `GET`/`PUT /v1/file` (raw body), not by embedding
+  base64 in a `/v1/exec` command line. A request whose JSON header would
+  exceed the limit is rejected before it is sent, with HTTP 413 and a message
+  giving its size, for example `exec request header is 180512 bytes, over the
+  65536-byte JSON header limit`.
+- `/v1/exec` returns stdout/stderr inside the JSON reply. Output that does not
+  fit is cut to its last part, with `"truncated": true` and a
+  `truncated_reason`; redirect large output to a file and fetch it with
+  `/v1/file`.
+- Any other reply or request that cannot be framed now produces an explicit
+  error message instead of the stream closing silently (which surfaced as
+  "agent closed the control stream without replying").
+
 ## Standalone builds
 
 On Windows:

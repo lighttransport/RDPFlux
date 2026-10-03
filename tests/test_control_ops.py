@@ -251,3 +251,45 @@ async def test_exec_runs_over_the_tunnel():
         assert result["stdout"].strip() == "tunnelled"
     finally:
         await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_oversized_request_header_is_reported_before_sending():
+    from rdpflux.control.client import ControlRequestTooLarge
+    client, agent = await connect(allow_exec=True)
+    try:
+        with pytest.raises(ControlRequestTooLarge, match="exec request header is .* over the 65536-byte JSON header limit.*/v1/file"):
+            await client.exec([sys.executable, "-c", "pass", "x" * 70000])
+        # The mux is still usable afterwards.
+        result = await client.exec([sys.executable, "-c", "print('alive')"])
+        assert result["stdout"].strip() == "alive"
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_output_over_the_header_limit_is_truncated_not_dropped():
+    client, agent = await connect(allow_exec=True)
+    try:
+        result = await client.exec([sys.executable, "-c",
+                                    "import sys; sys.stdout.write('a' * 300000 + 'END')"])
+        assert result["exit_code"] == 0
+        assert result["truncated"] is True
+        assert result["stdout"].endswith("END")
+        assert len(result["stdout"]) < 65536
+        assert "/v1/file" in result["truncated_reason"]
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_exec_output_with_escaped_characters_still_fits():
+    # Control characters expand six-fold in JSON (\u0001); trimming must converge.
+    client, agent = await connect(allow_exec=True)
+    try:
+        result = await client.exec([sys.executable, "-c",
+                                    "import sys; sys.stdout.write(chr(1) * 200000 + 'END')"])
+        assert result["truncated"] is True
+        assert result["stdout"].endswith("END")
+    finally:
+        await agent.close()
