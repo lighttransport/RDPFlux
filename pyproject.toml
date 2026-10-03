@@ -30,6 +30,7 @@ test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 [project.scripts]
 rdpflux-client = "rdpflux.client:main"
 rdpflux-agent = "rdpflux.agent:main"
+rdpflux-ctl = "rdpflux.control.ctl:main"
 
 [tool.setuptools.packages.find]
 include = ["rdpflux*"]

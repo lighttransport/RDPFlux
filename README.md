@@ -523,6 +523,37 @@ chunks. Anything large therefore belongs in a body, not in JSON:
   error message instead of the stream closing silently (which surfaced as
   "agent closed the control stream without replying").
 
+### Command-line client (`rdpflux-ctl`)
+
+`rdpflux-ctl` drives the control REST API from a shell. It reads the listener
+URL and token from `RDPFLUX_URL` and `RDPFLUX_TOKEN`, or from `--url` and
+`--token`.
+
+```sh
+export RDPFLUX_URL=http://127.0.0.1:18080 RDPFLUX_TOKEN=change-me
+rdpflux-ctl diag
+rdpflux-ctl exec -- powershell -NoProfile -Command "Get-ChildItem C:\work"
+rdpflux-ctl put build.zip work:/incoming/build.zip --create-parents
+rdpflux-ctl get work:/logs/run.log run.log
+rdpflux-ctl ls work:/logs
+```
+
+- **Exit codes:** `exec` returns the remote exit code, and prints the
+  truncation notice if the output did not fit in the reply. Every subcommand
+  exits 2 on a transport or API error.
+- **Transfers:** `put` and `get` stream files of any size through `/v1/file`.
+  They are the way to move data; never embed file contents in an `exec`
+  command line. `put` checks the size the agent reports, and `get` writes to
+  a temporary file before renaming.
+- **Retries:** transient failures (connection errors, HTTP 502) are retried
+  for `get`, `ls`, `diag` and `put`. `exec` is not retried unless `--retries`
+  is given, because a 502 can arrive after the remote command has already
+  run.
+- **Long jobs:** start them detached on the remote host, for example as a
+  scheduled task or with `Start-Process`. Have them write a status file, then
+  poll it with short `exec` calls or `get`. A single `exec` is limited to
+  300 s.
+
 ## Standalone builds
 
 On Windows:

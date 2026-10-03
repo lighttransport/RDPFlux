@@ -32,6 +32,8 @@ class HTTPControlClient:
             return await self._json("POST", "/v1/exec", json_body=params)
         if op == "list_dir":
             return await self._json("GET", f"/v1/dir?path={quote(params.get('path', '.'))}")
+        if op == "system_diagnostics":
+            return await self._json("GET", "/v1/system/diagnostics")
         raise ControlError(f"HTTP control client does not support op {op!r}")
 
     async def screenshot(self, *, width: int | None = None, image_format: str = "png",
@@ -40,6 +42,10 @@ class HTTPControlClient:
         if width is not None:
             params["width"] = width
         return await self.request("screenshot", params)
+
+    async def list_dir(self, path: str = ".") -> dict[str, Any]:
+        result, _ = await self.request("list_dir", {"path": path})
+        return result
 
     async def read_file(self, path: str) -> tuple[dict[str, Any], bytes]:
         status, ctype, body = await self._send("GET", f"/v1/file?path={quote(path)}")
